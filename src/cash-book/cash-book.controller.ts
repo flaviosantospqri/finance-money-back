@@ -4,6 +4,7 @@ import { CashBookQueryDto } from './dto/cash-book-query.dto.js';
 import { CashBookSummaryQueryDto } from './dto/cash-book-summary-query.dto.js';
 import { CreateCashBookEntryDto } from './dto/create-cash-book-entry.dto.js';
 import { UpdateCashBookEntryDto } from './dto/update-cash-book-entry.dto.js';
+import { ReorderCashBookEntriesDto } from './dto/reorder-cash-book-entries.dto.js';
 
 @Controller('cash-book')
 export class CashBookController {
@@ -17,6 +18,11 @@ export class CashBookController {
   @Get()
   findAll(@Query() filters: CashBookQueryDto) {
     return this.cashBook.findAll(filters);
+  }
+
+  @Patch('order')
+  reorder(@Body() input: ReorderCashBookEntriesDto) {
+    return this.cashBook.reorder(input);
   }
 
   @Post()

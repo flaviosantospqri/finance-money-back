@@ -4,6 +4,7 @@ import { assertPositiveAmount, rethrowDatabaseError } from '../common/database-e
 import { CreateCashBookEntryDto } from './dto/create-cash-book-entry.dto.js';
 import { CashBookQueryDto } from './dto/cash-book-query.dto.js';
 import { UpdateCashBookEntryDto } from './dto/update-cash-book-entry.dto.js';
+import { ReorderCashBookEntriesDto } from './dto/reorder-cash-book-entries.dto.js';
 
 type AccountLedgerContext = { id: string; name: string; type: string; active: boolean; opening_balance: string; reference_date: string };
 
@@ -86,8 +87,10 @@ export class CashBookService {
          LEFT JOIN financial_accounts destination ON destination.id = t.destination_account_id
          WHERE e.account_id = $1 AND e.deleted_at IS NULL AND e.occurred_at >= $2 AND e.occurred_at < $3
        )
-       SELECT * FROM ledger ${filterSql(4, true)}
-       ORDER BY "occurredAt", description COLLATE "C", type, amount, id
+       SELECT ledger.*, ordering.position AS "displayPosition" FROM ledger
+       LEFT JOIN cash_book_entry_order ordering ON ordering.entry_id = ledger.id
+       ${filterSql(4, true)}
+       ORDER BY ordering.position NULLS LAST, ledger."createdAt", ledger.id
        LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values,
     );
@@ -154,15 +157,20 @@ export class CashBookService {
     assertPositiveAmount(input.amount);
     await this.assertValidReferences(input.accountId, input.categoryId, input.type, input.occurredAt);
     try {
-      const result = await this.database.query(
-        `INSERT INTO cash_book_entries (account_id, category_id, entry_type, occurred_at, description, amount, notes)
+      const result = await this.database.transaction(async (client) => {
+        const inserted = await client.query(
+          `INSERT INTO cash_book_entries (account_id, category_id, entry_type, occurred_at, description, amount, notes)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, account_id AS "accountId", category_id AS "categoryId", entry_type AS type,
            to_char(occurred_at, 'YYYY-MM-DD') AS "occurredAt", description, amount::text AS amount,
            notes, created_at AS "createdAt", updated_at AS "updatedAt"`,
-        [input.accountId, input.categoryId, input.type, input.occurredAt, input.description.trim(), input.amount, input.notes?.trim() || null],
-      );
-      return result.rows[0];
+            [input.accountId, input.categoryId, input.type, input.occurredAt, input.description.trim(), input.amount, input.notes?.trim() || null],
+          );
+        const entry = inserted.rows[0] as { id: string };
+        await this.appendOrder(client, entry.id, input.accountId, input.occurredAt);
+        return entry;
+      });
+      return result;
     } catch (error) {
       rethrowDatabaseError(error);
     }
@@ -180,20 +188,72 @@ export class CashBookService {
     assertPositiveAmount(amount);
     await this.assertValidReferences(accountId, categoryId, type, occurredAt);
     try {
-      const result = await this.database.query(
-        `UPDATE cash_book_entries SET account_id = $2, category_id = $3, entry_type = $4,
+      const result = await this.database.transaction(async (client) => {
+        const updated = await client.query(
+          `UPDATE cash_book_entries SET account_id = $2, category_id = $3, entry_type = $4,
          occurred_at = $5, description = $6, amount = $7, notes = $8, updated_at = NOW()
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING id, account_id AS "accountId", category_id AS "categoryId", entry_type AS type,
          to_char(occurred_at, 'YYYY-MM-DD') AS "occurredAt", description, amount::text AS amount,
          notes, created_at AS "createdAt", updated_at AS "updatedAt"`,
-        [id, accountId, categoryId, type, occurredAt, (input.description ?? current.description as string).trim(), amount,
-          input.notes === undefined ? current.notes : input.notes?.trim() || null],
-      );
-      return result.rows[0];
+            [id, accountId, categoryId, type, occurredAt, (input.description ?? current.description as string).trim(), amount,
+              input.notes === undefined ? current.notes : input.notes?.trim() || null],
+          );
+        const entry = updated.rows[0];
+        if (current.accountId !== accountId || (current.occurredAt as string).slice(0, 7) !== occurredAt.slice(0, 7)) {
+          await this.appendOrder(client, id, accountId, occurredAt);
+        }
+        return entry;
+      });
+      return result;
     } catch (error) {
       rethrowDatabaseError(error);
     }
+  }
+
+  async reorder(input: ReorderCashBookEntriesDto) {
+    return this.database.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`cash-book-order:${input.accountId}:${input.month}`]);
+      const result = await client.query<{ id: string }>(
+        `SELECT e.id FROM cash_book_entries e
+         LEFT JOIN cash_book_entry_order ordering ON ordering.entry_id = e.id
+         WHERE e.account_id = $1 AND e.deleted_at IS NULL
+           AND e.occurred_at >= ($2 || '-01')::date
+           AND e.occurred_at < (($2 || '-01')::date + INTERVAL '1 month')
+         ORDER BY ordering.position NULLS LAST, e.created_at, e.id FOR UPDATE OF e`,
+        [input.accountId, input.month],
+      );
+      const allIds = result.rows.map((row) => row.id);
+      const offset = (input.page - 1) * input.pageSize;
+      const currentPageIds = allIds.slice(offset, offset + input.pageSize);
+      if (currentPageIds.length !== input.orderedEntryIds.length ||
+          new Set(input.orderedEntryIds).size !== currentPageIds.length ||
+          currentPageIds.some((id) => !input.orderedEntryIds.includes(id))) {
+        throw new BadRequestException('A lista de movimentações mudou. Atualize a tabela antes de reordenar.');
+      }
+      allIds.splice(offset, currentPageIds.length, ...input.orderedEntryIds);
+      for (const [index, id] of allIds.entries()) {
+        await client.query(
+          `INSERT INTO cash_book_entry_order (entry_id, account_id, period, position)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (entry_id) DO UPDATE SET account_id = EXCLUDED.account_id, period = EXCLUDED.period, position = EXCLUDED.position`,
+          [id, input.accountId, input.month, (index + 1) * 1024],
+        );
+      }
+      return { reordered: true };
+    });
+  }
+
+  private async appendOrder(client: import('pg').PoolClient, entryId: string, accountId: string, occurredAt: string) {
+    const period = occurredAt.slice(0, 7);
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`cash-book-order:${accountId}:${period}`]);
+    await client.query(
+      `INSERT INTO cash_book_entry_order (entry_id, account_id, period, position)
+       SELECT $1, $2, $3, COALESCE(MAX(position), 0) + 1024
+       FROM cash_book_entry_order WHERE account_id = $2 AND period = $3
+       ON CONFLICT (entry_id) DO UPDATE SET account_id = EXCLUDED.account_id, period = EXCLUDED.period, position = EXCLUDED.position`,
+      [entryId, accountId, period],
+    );
   }
 
   async remove(id: string) {

@@ -56,9 +56,10 @@ export class TransfersService {
           ],
         );
         const transferId = transfer.rows[0].id;
-        await client.query(
+        const entries = await client.query<{ id: string; account_id: string }>(
           `INSERT INTO cash_book_entries (account_id, transfer_id, entry_type, occurred_at, description, amount, notes)
-         VALUES ($1, $2, 'transfer_debit', $3, $4, $5, $6), ($7, $2, 'transfer_credit', $3, $4, $5, $6)`,
+         VALUES ($1, $2, 'transfer_debit', $3, $4, $5, $6), ($7, $2, 'transfer_credit', $3, $4, $5, $6)
+         RETURNING id, account_id`,
           [
             input.sourceAccountId,
             transferId,
@@ -69,6 +70,7 @@ export class TransfersService {
             input.destinationAccountId,
           ],
         );
+        for (const entry of entries.rows) await this.appendCashBookOrder(client, entry.id, entry.account_id, input.occurredAt);
         await this.syncInvestmentMovements(
           client,
           transferId,
@@ -175,6 +177,11 @@ export class TransfersService {
            notes = $6, updated_at = NOW() WHERE transfer_id = $1 AND entry_type = 'transfer_credit' AND deleted_at IS NULL`,
           [id, destinationAccountId, occurredAt, description, amount, notes],
         );
+        const entries = await client.query<{ id: string; account_id: string; occurred_at: string }>(
+          `SELECT id, account_id, to_char(occurred_at, 'YYYY-MM-DD') AS occurred_at
+           FROM cash_book_entries WHERE transfer_id = $1 AND deleted_at IS NULL`, [id],
+        );
+        for (const entry of entries.rows) await this.appendCashBookOrder(client, entry.id, entry.account_id, entry.occurred_at);
         return this.findOneWithClient(client, id);
       });
     } catch (error) {
@@ -185,6 +192,19 @@ export class TransfersService {
         throw error;
       rethrowDatabaseError(error);
     }
+  }
+
+  private async appendCashBookOrder(client: PoolClient, entryId: string, accountId: string, occurredAt: string) {
+    const period = occurredAt.slice(0, 7);
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`cash-book-order:${accountId}:${period}`]);
+    await client.query(
+      `INSERT INTO cash_book_entry_order (entry_id, account_id, period, position)
+       SELECT $1, $2, $3, COALESCE(MAX(position), 0) + 1024
+       FROM cash_book_entry_order WHERE account_id = $2 AND period = $3
+       ON CONFLICT (entry_id) DO UPDATE SET account_id = EXCLUDED.account_id, period = EXCLUDED.period, position = EXCLUDED.position
+       WHERE cash_book_entry_order.account_id <> EXCLUDED.account_id OR cash_book_entry_order.period <> EXCLUDED.period`,
+      [entryId, accountId, period],
+    );
   }
 
   async remove(id: string) {
