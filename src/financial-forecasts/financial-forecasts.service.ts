@@ -93,7 +93,7 @@ export class FinancialForecastsService {
       ), records AS (
         SELECT f.id, f.series_id AS "seriesId", f.occurrence_index AS "occurrenceIndex", s.occurrence_count AS "occurrenceCount",
           f.kind, f.description, f.amount::text AS amount, to_char(f.due_date,'YYYY-MM-DD') AS "dueDate",
-          f.category_id AS "categoryId", c.name AS "categoryName", f.account_id AS "accountId", a.name AS "accountName",
+          f.category_id AS "categoryId", c.name AS "categoryName", category_destination.name AS "categoryDestinationName", f.account_id AS "accountId", a.name AS "accountName",
           f.destination_id AS "destinationId", d.name AS "destinationName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
           CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST(f.amount-COALESCE(r.realized,0),0)::text END AS pending,
           (COALESCE(r.realized,0)>f.amount) AS divergence, f.closed_at IS NOT NULL AS closed,
@@ -101,7 +101,9 @@ export class FinancialForecastsService {
             WHEN COALESCE(r.realized,0)>0 THEN 'partial'
             WHEN f.due_date < CURRENT_DATE THEN 'overdue' ELSE 'pending' END AS status
         FROM financial_forecasts f JOIN financial_forecast_series s ON s.id=f.series_id
-        JOIN financial_categories c ON c.id=f.category_id LEFT JOIN financial_accounts a ON a.id=f.account_id
+        JOIN financial_categories c ON c.id=f.category_id
+        LEFT JOIN forecast_destinations category_destination ON category_destination.id=c.destination_id
+        LEFT JOIN financial_accounts a ON a.id=f.account_id
         LEFT JOIN forecast_destinations d ON d.id=f.destination_id LEFT JOIN reconciled r ON r.forecast_id=f.id
         WHERE ${where.join(' AND ')}
       ) SELECT * FROM records ${filters.status ? `WHERE status = $${values.push(filters.status)}` : ''} ORDER BY "dueDate", description COLLATE "C", id`,
@@ -132,8 +134,8 @@ export class FinancialForecastsService {
       );
     const count = input.recurrence === 'once' ? 1 : input.occurrenceCount;
     return this.db.transaction(async (client) => {
-      const category = await client.query(
-        'SELECT id FROM financial_categories WHERE id=$1 AND nature=$2 AND active=TRUE',
+      const category = await client.query<{ destination_id: string }>(
+        'SELECT id, destination_id FROM financial_categories WHERE id=$1 AND nature=$2 AND active=TRUE',
         [input.categoryId, input.kind],
       );
       if (!category.rowCount)
@@ -156,6 +158,9 @@ export class FinancialForecastsService {
       );
       const id = series.rows[0].id;
       const created: string[] = [];
+      const destinationId = input.kind === 'expense'
+        ? category.rows[0].destination_id
+        : input.destinationId || null;
       for (let index = 0; index < count; index += 1) {
         const dueDate = this.nextDate(input.dueDate, input.recurrence, index);
         const row = await client.query<{ id: string }>(
@@ -169,7 +174,7 @@ export class FinancialForecastsService {
             dueDate,
             input.categoryId,
             input.accountId || null,
-            input.destinationId || null,
+            destinationId,
             input.notes?.trim() || null,
           ],
         );
@@ -196,14 +201,15 @@ export class FinancialForecastsService {
         input.notes === undefined ? current.notes : input.notes?.trim() || null,
     };
     await this.db.transaction(async (client) => {
-      const valid = await client.query(
-        'SELECT id FROM financial_categories WHERE id=$1 AND nature=$2 AND active=TRUE',
+      const valid = await client.query<{ destination_id: string }>(
+        'SELECT id, destination_id FROM financial_categories WHERE id=$1 AND nature=$2 AND active=TRUE',
         [data.categoryId, current.kind],
       );
       if (!valid.rowCount)
         throw new BadRequestException(
           'A categoria não corresponde ao tipo da previsão.',
         );
+      if (current.kind === 'expense') data.destinationId = valid.rows[0].destination_id;
       const predicate =
         scope === 'future'
           ? 'series_id=$1 AND due_date >= $2 AND deleted_at IS NULL AND cancelled_at IS NULL'
@@ -432,7 +438,10 @@ export class FinancialForecastsService {
        SELECT d.id,d.name,d.value_type AS "valueType",d.allocation_value::text AS value,
          CASE WHEN d.value_type='percentage' THEN d.allocation_value ELSE 0 END::text AS percentage,
          CASE WHEN d.value_type='percentage' THEN d.allocation_value*income_total.amount/100 ELSE d.allocation_value END::numeric(14,2)::text AS budget,
-         COALESCE((SELECT SUM(COALESCE(r.amount,e.amount)) FROM financial_forecasts f JOIN forecast_reconciliations r ON r.forecast_id=f.id AND r.deleted_at IS NULL JOIN cash_book_entries e ON e.id=r.cash_book_entry_id AND e.deleted_at IS NULL WHERE f.destination_id=d.id AND f.kind='expense' AND f.cancelled_at IS NULL AND f.deleted_at IS NULL AND to_char(f.due_date,'YYYY-MM')=$1),0)::numeric(14,2)::text AS consumed
+         COALESCE((SELECT SUM(e.amount) FROM cash_book_entries e
+           JOIN financial_categories c ON c.id=e.category_id
+           WHERE c.destination_id=d.id AND e.entry_type='expense' AND e.deleted_at IS NULL
+             AND to_char(e.occurred_at,'YYYY-MM')=$1),0)::numeric(14,2)::text AS consumed
        FROM targets d CROSS JOIN income_total
        ORDER BY CASE d.name WHEN 'Casa/Lazer' THEN 1 WHEN 'Investimentos' THEN 2 WHEN 'Flávio' THEN 3 WHEN 'Laura' THEN 4 WHEN 'Outras' THEN 5 ELSE 6 END,d.name`,
       [period],

@@ -1,4 +1,4 @@
-import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 export class CreateFinancialCategoryDto {
   @IsString()
@@ -7,6 +7,10 @@ export class CreateFinancialCategoryDto {
 
   @IsIn(['income', 'expense'])
   nature!: 'income' | 'expense';
+
+  @IsOptional()
+  @IsUUID()
+  destinationId?: string;
 }
 
 export class UpdateFinancialCategoryDto {
@@ -22,4 +26,8 @@ export class UpdateFinancialCategoryDto {
   @IsOptional()
   @IsBoolean()
   active?: boolean;
+
+  @IsOptional()
+  @IsUUID()
+  destinationId?: string;
 }

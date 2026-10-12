@@ -69,7 +69,7 @@ export class CashBookService {
     const result = await this.database.query(
       `WITH ledger AS (
          SELECT e.id, e.transfer_id AS "transferId", e.account_id AS "accountId", a.name AS "accountName",
-           e.category_id AS "categoryId", c.name AS "categoryName", e.entry_type AS type,
+           e.category_id AS "categoryId", c.name AS "categoryName", repasse.name AS "destinationName", e.entry_type AS type,
            t.source_account_id AS "sourceAccountId", source.name AS "sourceAccountName",
            t.destination_account_id AS "destinationAccountId", destination.name AS "destinationAccountName",
            t.source_application_id AS "sourceApplicationId", t.destination_application_id AS "destinationApplicationId",
@@ -80,6 +80,7 @@ export class CashBookService {
          FROM cash_book_entries e
          JOIN financial_accounts a ON a.id = e.account_id
          LEFT JOIN financial_categories c ON c.id = e.category_id
+         LEFT JOIN forecast_destinations repasse ON repasse.id = c.destination_id
          LEFT JOIN cash_book_transfers t ON t.id = e.transfer_id
          LEFT JOIN financial_accounts source ON source.id = t.source_account_id
          LEFT JOIN financial_accounts destination ON destination.id = t.destination_account_id
@@ -134,12 +135,13 @@ export class CashBookService {
   async findOne(id: string) {
     const result = await this.database.query(
       `SELECT e.id, e.transfer_id AS "transferId", e.account_id AS "accountId", a.name AS "accountName",
-         e.category_id AS "categoryId", c.name AS "categoryName", e.entry_type AS type,
+         e.category_id AS "categoryId", c.name AS "categoryName", repasse.name AS "destinationName", e.entry_type AS type,
          t.source_application_id AS "sourceApplicationId", t.destination_application_id AS "destinationApplicationId",
          to_char(e.occurred_at, 'YYYY-MM-DD') AS "occurredAt", e.description, e.amount::text AS amount,
          e.notes, e.created_at AS "createdAt", e.updated_at AS "updatedAt"
        FROM cash_book_entries e JOIN financial_accounts a ON a.id = e.account_id
        LEFT JOIN financial_categories c ON c.id = e.category_id
+       LEFT JOIN forecast_destinations repasse ON repasse.id = c.destination_id
        LEFT JOIN cash_book_transfers t ON t.id = e.transfer_id
        WHERE e.id = $1 AND e.deleted_at IS NULL`, [id],
     );

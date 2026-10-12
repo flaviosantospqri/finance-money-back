@@ -16,6 +16,7 @@ import { financialForecastsSchema } from './migrations/002-financial-forecasts.j
 import { investmentsSchema } from './migrations/003-investments.js';
 import { accountInstitutionSchema } from './migrations/004-account-institution.js';
 import { financialRepassesSchema } from './migrations/005-financial-repasses.js';
+import { categoryRepasseSchema } from './migrations/006-category-repasse.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -106,6 +107,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['005-financial-repasses'],
         );
         this.logger.log('Applied database migration 005-financial-repasses.');
+      }
+      const categoryRepasseApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['006-category-repasse'],
+      );
+      if (categoryRepasseApplied.rowCount === 0) {
+        await client.query(categoryRepasseSchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['006-category-repasse'],
+        );
+        this.logger.log('Applied database migration 006-category-repasse.');
       }
       await client.query('COMMIT');
     } catch (error) {
