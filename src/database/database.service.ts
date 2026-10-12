@@ -18,6 +18,7 @@ import { accountInstitutionSchema } from './migrations/004-account-institution.j
 import { financialRepassesSchema } from './migrations/005-financial-repasses.js';
 import { categoryRepasseSchema } from './migrations/006-category-repasse.js';
 import { cashBookEntryOrderSchema } from './migrations/007-cash-book-entry-order.js';
+import { categoryHierarchySchema } from './migrations/008-category-hierarchy.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -132,6 +133,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['007-cash-book-entry-order'],
         );
         this.logger.log('Applied database migration 007-cash-book-entry-order.');
+      }
+      const categoryHierarchyApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['008-category-hierarchy'],
+      );
+      if (categoryHierarchyApplied.rowCount === 0) {
+        await client.query(categoryHierarchySchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['008-category-hierarchy'],
+        );
+        this.logger.log('Applied database migration 008-category-hierarchy.');
       }
       await client.query('COMMIT');
     } catch (error) {

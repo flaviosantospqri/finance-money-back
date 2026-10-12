@@ -11,6 +11,10 @@ export class CreateFinancialCategoryDto {
   @IsOptional()
   @IsUUID()
   destinationId?: string;
+
+  @IsOptional()
+  @IsUUID()
+  parentCategoryId?: string | null;
 }
 
 export class UpdateFinancialCategoryDto {
@@ -30,4 +34,8 @@ export class UpdateFinancialCategoryDto {
   @IsOptional()
   @IsUUID()
   destinationId?: string;
+
+  @IsOptional()
+  @IsUUID()
+  parentCategoryId?: string | null;
 }

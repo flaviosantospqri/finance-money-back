@@ -93,7 +93,7 @@ export class FinancialForecastsService {
       ), records AS (
         SELECT f.id, f.series_id AS "seriesId", f.occurrence_index AS "occurrenceIndex", s.occurrence_count AS "occurrenceCount",
           f.kind, f.description, f.amount::text AS amount, to_char(f.due_date,'YYYY-MM-DD') AS "dueDate",
-          f.category_id AS "categoryId", c.name AS "categoryName", category_destination.name AS "categoryDestinationName", f.account_id AS "accountId", a.name AS "accountName",
+          f.category_id AS "categoryId", concat_ws(' / ', parent_category.name, c.name) AS "categoryName", category_destination.name AS "categoryDestinationName", f.account_id AS "accountId", a.name AS "accountName",
           f.destination_id AS "destinationId", d.name AS "destinationName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
           CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST(f.amount-COALESCE(r.realized,0),0)::text END AS pending,
           (COALESCE(r.realized,0)>f.amount) AS divergence, f.closed_at IS NOT NULL AS closed,
@@ -102,6 +102,7 @@ export class FinancialForecastsService {
             WHEN f.due_date < CURRENT_DATE THEN 'overdue' ELSE 'pending' END AS status
         FROM financial_forecasts f JOIN financial_forecast_series s ON s.id=f.series_id
         JOIN financial_categories c ON c.id=f.category_id
+        LEFT JOIN financial_categories parent_category ON parent_category.id=c.parent_category_id
         LEFT JOIN forecast_destinations category_destination ON category_destination.id=c.destination_id
         LEFT JOIN financial_accounts a ON a.id=f.account_id
         LEFT JOIN forecast_destinations d ON d.id=f.destination_id LEFT JOIN reconciled r ON r.forecast_id=f.id
