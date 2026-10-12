@@ -76,8 +76,9 @@ export class CashBookService {
            t.source_application_id AS "sourceApplicationId", t.destination_application_id AS "destinationApplicationId",
            to_char(e.occurred_at, 'YYYY-MM-DD') AS "occurredAt", e.description,
            e.amount::text AS amount, e.notes, e.created_at AS "createdAt", e.updated_at AS "updatedAt",
+           ordering.position AS "displayPosition",
            ($4::numeric + SUM(CASE WHEN e.entry_type IN ('income', 'transfer_credit') THEN e.amount ELSE -e.amount END)
-             OVER (ORDER BY e.occurred_at, e.description COLLATE "C", e.entry_type, e.amount, e.id))::text AS balance
+             OVER (ORDER BY ordering.position NULLS LAST, e.created_at, e.id))::text AS balance
          FROM cash_book_entries e
          JOIN financial_accounts a ON a.id = e.account_id
          LEFT JOIN financial_categories c ON c.id = e.category_id
@@ -85,12 +86,11 @@ export class CashBookService {
          LEFT JOIN cash_book_transfers t ON t.id = e.transfer_id
          LEFT JOIN financial_accounts source ON source.id = t.source_account_id
          LEFT JOIN financial_accounts destination ON destination.id = t.destination_account_id
+         LEFT JOIN cash_book_entry_order ordering ON ordering.entry_id = e.id
          WHERE e.account_id = $1 AND e.deleted_at IS NULL AND e.occurred_at >= $2 AND e.occurred_at < $3
        )
-       SELECT ledger.*, ordering.position AS "displayPosition" FROM ledger
-       LEFT JOIN cash_book_entry_order ordering ON ordering.entry_id = ledger.id
-       ${filterSql(4, true)}
-       ORDER BY ordering.position NULLS LAST, ledger."createdAt", ledger.id
+       SELECT ledger.* FROM ledger ${filterSql(4, true)}
+       ORDER BY "displayPosition" NULLS LAST, "createdAt", id
        LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values,
     );
