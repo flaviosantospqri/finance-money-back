@@ -292,9 +292,42 @@ export class FinancialForecastsService {
     const actual = await this.db.query<{ balance: string }>(
       `SELECT COALESCE(SUM(CASE WHEN CURRENT_DATE<a.reference_date THEN 0::numeric ELSE a.opening_balance + COALESCE((SELECT SUM(CASE WHEN e.entry_type IN ('income','transfer_credit') THEN e.amount ELSE -e.amount END) FROM cash_book_entries e WHERE e.account_id=a.id AND e.deleted_at IS NULL AND e.occurred_at >= a.reference_date AND e.occurred_at <= CURRENT_DATE),0) END),0)::text AS balance FROM financial_accounts a WHERE a.active=TRUE`,
     );
-    const future = await this.db.query<{ projected: string }>(
-      `WITH reconciled AS (SELECT r.forecast_id,SUM(COALESCE(r.amount,e.amount)) realized FROM forecast_reconciliations r JOIN cash_book_entries e ON e.id=r.cash_book_entry_id AND e.deleted_at IS NULL WHERE r.deleted_at IS NULL GROUP BY r.forecast_id) SELECT (COALESCE((SELECT SUM(CASE WHEN e.entry_type IN ('income','transfer_credit') THEN e.amount ELSE -e.amount END) FROM cash_book_entries e WHERE e.deleted_at IS NULL AND e.occurred_at>CURRENT_DATE AND e.occurred_at<=$1::date),0)+COALESCE((SELECT SUM(CASE WHEN f.kind='income' THEN GREATEST(f.amount-COALESCE(r.realized,0),0) ELSE -GREATEST(f.amount-COALESCE(r.realized,0),0) END) FROM financial_forecasts f LEFT JOIN reconciled r ON r.forecast_id=f.id WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL AND f.due_date>=CURRENT_DATE AND f.due_date<=$1::date),0))::text AS projected`,
+    const projection = await this.db.query<{
+      projection_open: boolean;
+      cash_movements: string;
+      pending_income: string;
+      pending_expenses: string;
+    }>(
+      `WITH reconciled AS (
+        SELECT r.forecast_id,SUM(COALESCE(r.amount,e.amount)) AS realized
+        FROM forecast_reconciliations r
+        JOIN cash_book_entries e ON e.id=r.cash_book_entry_id AND e.deleted_at IS NULL
+        WHERE r.deleted_at IS NULL GROUP BY r.forecast_id
+       )
+       SELECT CURRENT_DATE <= $1::date AS projection_open,
+        COALESCE(SUM(CASE WHEN e.entry_type IN ('income','transfer_credit') THEN e.amount ELSE -e.amount END)
+          FILTER (WHERE e.occurred_at>CURRENT_DATE AND e.occurred_at<=$1::date),0)::text AS cash_movements,
+        COALESCE((SELECT SUM(GREATEST(f.amount-COALESCE(r.realized,0),0))
+          FROM financial_forecasts f LEFT JOIN reconciled r ON r.forecast_id=f.id
+          WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL
+            AND f.kind='income' AND f.due_date<=$1::date),0)::text AS pending_income,
+        COALESCE((SELECT SUM(GREATEST(f.amount-COALESCE(r.realized,0),0))
+          FROM financial_forecasts f LEFT JOIN reconciled r ON r.forecast_id=f.id
+          WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL
+            AND f.kind='expense' AND f.due_date<=$1::date),0)::text AS pending_expenses
+       FROM cash_book_entries e WHERE e.deleted_at IS NULL`,
       [monthEnd],
+    );
+    const projectionOpen = projection.rows[0].projection_open;
+    const pendingIncome = projectionOpen ? projection.rows[0].pending_income : '0.00';
+    const pendingExpenses = projectionOpen ? projection.rows[0].pending_expenses : '0.00';
+    const futureCashMovements = projectionOpen
+      ? projection.rows[0].cash_movements
+      : '0.00';
+    const futureNet = sumMoney(
+      futureCashMovements,
+      pendingIncome,
+      `-${pendingExpenses}`,
     );
     return {
       period,
@@ -303,11 +336,12 @@ export class FinancialForecastsService {
       resultProjected: sumMoney(income, `-${expense}`),
       committedPending: committed,
       realBalance: actual.rows[0].balance,
-      projectedBalance: sumMoney(
-        actual.rows[0].balance,
-        future.rows[0].projected,
-      ),
-      futureNet: future.rows[0].projected,
+      projectedBalance: sumMoney(actual.rows[0].balance, futureNet),
+      futureCashMovements,
+      pendingIncome,
+      pendingExpenses,
+      futureNet,
+      projectionOpen,
     };
   }
 
