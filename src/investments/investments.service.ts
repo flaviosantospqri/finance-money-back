@@ -196,7 +196,7 @@ export class InvestmentsService {
        balances AS (SELECT m.*,($2::numeric+SUM(m.signed) OVER(ORDER BY m."occurredAt",m.created_at,m.id))::text AS balance FROM movements m)
        SELECT id,"occurredAt",type,amount,origin,notes,balance,transfer_id AS "transferId" FROM balances
        WHERE ($3::date IS NULL OR movement_date>=date_trunc('month',$3::date)::date) AND ($4::date IS NULL OR movement_date<(date_trunc('month',$4::date)+INTERVAL '1 month'))
-       ORDER BY "occurredAt" DESC,created_at DESC,id DESC`,
+       ORDER BY "occurredAt" ASC,created_at ASC,id ASC`,
       [
         applicationId,
         app.rows[0].opening_balance,
