@@ -109,13 +109,13 @@ export class InvestmentsService {
             `SELECT to_char(MIN(occurred_at),'YYYY-MM-DD') AS first_date FROM investment_transactions WHERE application_id=$1 AND deleted_at IS NULL`,
             [id],
           );
-          if (
-            firstMovement.rows[0]?.first_date &&
-            input.referenceDate > firstMovement.rows[0].first_date
-          )
+          const firstMovementDate = firstMovement.rows[0]?.first_date;
+          if (firstMovementDate && input.referenceDate > firstMovementDate) {
+            const [year, month, day] = firstMovementDate.split('-');
             throw new BadRequestException(
-              'A data de referência não pode ficar depois de uma movimentação já registrada.',
+              `A data de referência não pode ser posterior a ${day}/${month}/${year}, data da primeira movimentação desta aplicação. Escolha uma data igual ou anterior ou ajuste as movimentações existentes.`,
             );
+          }
         }
         if (input.accountId)
           await this.assertInvestmentAccount(client, input.accountId);
