@@ -20,6 +20,7 @@ import { categoryRepasseSchema } from './migrations/006-category-repasse.js';
 import { cashBookEntryOrderSchema } from './migrations/007-cash-book-entry-order.js';
 import { categoryHierarchySchema } from './migrations/008-category-hierarchy.js';
 import { forecastGroupsSchema } from './migrations/009-forecast-groups.js';
+import { investmentLedgerOnlySchema } from './migrations/010-investment-ledger-only.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -158,6 +159,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['009-forecast-groups'],
         );
         this.logger.log('Applied database migration 009-forecast-groups.');
+      }
+      const investmentLedgerOnlyApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['010-investment-ledger-only'],
+      );
+      if (investmentLedgerOnlyApplied.rowCount === 0) {
+        await client.query(investmentLedgerOnlySchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['010-investment-ledger-only'],
+        );
+        this.logger.log('Applied database migration 010-investment-ledger-only.');
       }
       await client.query('COMMIT');
     } catch (error) {

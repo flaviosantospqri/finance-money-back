@@ -71,16 +71,6 @@ export class TransfersService {
           ],
         );
         for (const entry of entries.rows) await this.appendCashBookOrder(client, entry.id, entry.account_id, input.occurredAt);
-        await this.syncInvestmentMovements(
-          client,
-          transferId,
-          input.occurredAt,
-          input.description.trim(),
-          input.amount,
-          input.notes?.trim() || null,
-          applications.source,
-          applications.destination,
-        );
         return this.findOneWithClient(client, transferId);
       })
       .catch((error: unknown) => rethrowDatabaseError(error));
@@ -161,16 +151,6 @@ export class TransfersService {
           `UPDATE cash_book_entries SET account_id = $2, occurred_at = $3, description = $4, amount = $5,
            notes = $6, updated_at = NOW() WHERE transfer_id = $1 AND entry_type = 'transfer_debit' AND deleted_at IS NULL`,
           [id, sourceAccountId, occurredAt, description, amount, notes],
-        );
-        await this.syncInvestmentMovements(
-          client,
-          id,
-          occurredAt,
-          description,
-          amount,
-          notes,
-          applications.source,
-          applications.destination,
         );
         await client.query(
           `UPDATE cash_book_entries SET account_id = $2, occurred_at = $3, description = $4, amount = $5,
@@ -308,32 +288,6 @@ export class TransfersService {
       source: sourceApplicationId ?? null,
       destination: destinationApplicationId ?? null,
     };
-  }
-
-  private async syncInvestmentMovements(
-    client: PoolClient,
-    id: string,
-    occurredAt: string,
-    description: string,
-    amount: string,
-    notes: string | null,
-    sourceApplicationId: string | null,
-    destinationApplicationId: string | null,
-  ) {
-    await client.query(
-      'UPDATE investment_transactions SET deleted_at=NOW(),updated_at=NOW() WHERE transfer_id=$1 AND deleted_at IS NULL',
-      [id],
-    );
-    if (sourceApplicationId)
-      await client.query(
-        `INSERT INTO investment_transactions(application_id,transfer_id,occurred_at,transaction_type,amount,origin,notes) VALUES($1,$2,$3,'withdrawal',$4,$5,$6)`,
-        [sourceApplicationId, id, occurredAt, amount, description, notes],
-      );
-    if (destinationApplicationId)
-      await client.query(
-        `INSERT INTO investment_transactions(application_id,transfer_id,occurred_at,transaction_type,amount,origin,notes) VALUES($1,$2,$3,'contribution',$4,$5,$6)`,
-        [destinationApplicationId, id, occurredAt, amount, description, notes],
-      );
   }
 
   private async findOneWithClient(client: PoolClient, id: string) {

@@ -14,10 +14,6 @@ export class CreateInvestmentApplicationDto {
   @IsUUID() accountId!: string;
   @IsString() @MaxLength(80) investmentType!: string;
   @IsOptional() @IsString() @MaxLength(120) institution?: string;
-  @Matches(/^\d{1,12}(\.\d{1,2})?$/) openingBalance!: string;
-  @IsDateString({ strict: true })
-  @Matches(/^\d{4}-\d{2}-\d{2}$/)
-  referenceDate!: string;
   @IsOptional() @IsString() @MaxLength(1000) notes?: string;
 }
 
@@ -26,11 +22,6 @@ export class UpdateInvestmentApplicationDto {
   @IsOptional() @IsUUID() accountId?: string;
   @IsOptional() @IsString() @MaxLength(80) investmentType?: string;
   @IsOptional() @IsString() @MaxLength(120) institution?: string | null;
-  @IsOptional() @Matches(/^\d{1,12}(\.\d{1,2})?$/) openingBalance?: string;
-  @IsOptional()
-  @IsDateString({ strict: true })
-  @Matches(/^\d{4}-\d{2}-\d{2}$/)
-  referenceDate?: string;
   @IsOptional() @IsString() @MaxLength(1000) notes?: string | null;
   @IsOptional() @IsBoolean() active?: boolean;
 }
@@ -39,7 +30,7 @@ export class CreateInvestmentTransactionDto {
   @IsDateString({ strict: true })
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   occurredAt!: string;
-  @IsIn(['income', 'adjustment']) type!: 'income' | 'adjustment';
+  @IsIn(['contribution', 'withdrawal', 'income', 'adjustment']) type!: 'contribution' | 'withdrawal' | 'income' | 'adjustment';
   @Matches(/^-?\d{1,12}(\.\d{1,2})?$/) amount!: string;
   @IsOptional() @IsString() @MaxLength(120) origin?: string;
   @IsOptional() @IsString() @MaxLength(1000) notes?: string;
@@ -50,7 +41,7 @@ export class UpdateInvestmentTransactionDto {
   @IsDateString({ strict: true })
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   occurredAt?: string;
-  @IsOptional() @IsIn(['income', 'adjustment']) type?: 'income' | 'adjustment';
+  @IsOptional() @IsIn(['contribution', 'withdrawal', 'income', 'adjustment']) type?: 'contribution' | 'withdrawal' | 'income' | 'adjustment';
   @IsOptional() @Matches(/^-?\d{1,12}(\.\d{1,2})?$/) amount?: string;
   @IsOptional() @IsString() @MaxLength(120) origin?: string | null;
   @IsOptional() @IsString() @MaxLength(1000) notes?: string | null;

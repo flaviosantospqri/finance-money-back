@@ -21,10 +21,10 @@ export class InvestmentsService {
   async findAll(active?: boolean) {
     const result = await this.database.query(
       `SELECT a.id,a.name,a.account_id AS "accountId",fa.name AS "accountName",a.investment_type AS "investmentType",
-        COALESCE(a.institution,fa.institution) AS institution,a.opening_balance::text AS "openingBalance",to_char(a.reference_date,'YYYY-MM-DD') AS "referenceDate",
+        COALESCE(a.institution,fa.institution) AS institution,
         a.notes,a.active,a.deleted_at IS NOT NULL AS "deleted",
-        (a.opening_balance+COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
-          FROM investment_transactions t WHERE t.application_id=a.id AND t.deleted_at IS NULL AND t.occurred_at<=CURRENT_DATE),0))::text AS balance
+        COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
+          FROM investment_transactions t WHERE t.application_id=a.id AND t.deleted_at IS NULL AND t.occurred_at<=CURRENT_DATE),0)::text AS balance
        FROM investment_applications a JOIN financial_accounts fa ON fa.id=a.account_id
        WHERE a.deleted_at IS NULL AND ($1::boolean IS NULL OR a.active=$1) ORDER BY a.active DESC,a.name`,
       [active ?? null],
@@ -40,16 +40,14 @@ export class InvestmentsService {
     );
     try {
       const result = await this.database.query(
-        `INSERT INTO investment_applications(name,account_id,investment_type,institution,opening_balance,reference_date,notes)
-         SELECT $1,fa.id,$3,$4,$5,$6,$7 FROM financial_accounts fa WHERE fa.id=$2 AND fa.type='investment' AND fa.active=TRUE
-         RETURNING id,name,account_id AS "accountId",investment_type AS "investmentType",institution,opening_balance::text AS "openingBalance",to_char(reference_date,'YYYY-MM-DD') AS "referenceDate",notes,active`,
+        `INSERT INTO investment_applications(name,account_id,investment_type,institution,notes)
+         SELECT $1,fa.id,$3,$4,$5 FROM financial_accounts fa WHERE fa.id=$2 AND fa.type='investment' AND fa.active=TRUE
+         RETURNING id,name,account_id AS "accountId",investment_type AS "investmentType",institution,notes,active`,
         [
           input.name.trim(),
           input.accountId,
           input.investmentType.trim(),
           input.institution?.trim() || null,
-          input.openingBalance,
-          input.referenceDate,
           input.notes?.trim() || null,
         ],
       );
@@ -67,7 +65,7 @@ export class InvestmentsService {
   async findOne(id: string) {
     const result = await this.database.query(
       `SELECT a.id,a.name,a.account_id AS "accountId",fa.name AS "accountName",a.investment_type AS "investmentType",COALESCE(a.institution,fa.institution) AS institution,
-        a.opening_balance::text AS "openingBalance",to_char(a.reference_date,'YYYY-MM-DD') AS "referenceDate",a.notes,a.active
+        a.notes,a.active
        FROM investment_applications a JOIN financial_accounts fa ON fa.id=a.account_id WHERE a.id=$1 AND a.deleted_at IS NULL`,
       [id],
     );
@@ -102,28 +100,12 @@ export class InvestmentsService {
               'A conta de uma aplicação com transferências vinculadas não pode ser alterada.',
             );
         }
-        if (input.referenceDate) {
-          const firstMovement = await client.query<{
-            first_date: string | null;
-          }>(
-            `SELECT to_char(MIN(occurred_at),'YYYY-MM-DD') AS first_date FROM investment_transactions WHERE application_id=$1 AND deleted_at IS NULL`,
-            [id],
-          );
-          const firstMovementDate = firstMovement.rows[0]?.first_date;
-          if (firstMovementDate && input.referenceDate > firstMovementDate) {
-            const [year, month, day] = firstMovementDate.split('-');
-            throw new BadRequestException(
-              `A data de referência não pode ser posterior a ${day}/${month}/${year}, data da primeira movimentação desta aplicação. Escolha uma data igual ou anterior ou ajuste as movimentações existentes.`,
-            );
-          }
-        }
         if (input.accountId)
           await this.assertInvestmentAccount(client, input.accountId);
         const result = await client.query(
           `UPDATE investment_applications SET name=COALESCE($2,name),account_id=COALESCE($3,account_id),investment_type=COALESCE($4,investment_type),
-           institution=CASE WHEN $5::boolean THEN $6 ELSE institution END,opening_balance=COALESCE($7::numeric,opening_balance),
-           reference_date=COALESCE($8::date,reference_date),notes=CASE WHEN $9::boolean THEN $10 ELSE notes END,active=COALESCE($11,active),updated_at=NOW()
-           WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,account_id AS "accountId",investment_type AS "investmentType",institution,opening_balance::text AS "openingBalance",to_char(reference_date,'YYYY-MM-DD') AS "referenceDate",notes,active`,
+           institution=CASE WHEN $5::boolean THEN $6 ELSE institution END,notes=CASE WHEN $7::boolean THEN $8 ELSE notes END,active=COALESCE($9,active),updated_at=NOW()
+           WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,account_id AS "accountId",investment_type AS "investmentType",institution,notes,active`,
           [
             id,
             input.name?.trim() ?? null,
@@ -131,8 +113,6 @@ export class InvestmentsService {
             input.investmentType?.trim() ?? null,
             input.institution !== undefined,
             input.institution?.trim() || null,
-            input.openingBalance ?? null,
-            input.referenceDate ?? null,
             input.notes !== undefined,
             input.notes?.trim() || null,
             input.active ?? null,
@@ -167,9 +147,9 @@ export class InvestmentsService {
     const [year, month] = query.month.split('-').map(Number);
     const endDate = `${query.month}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
     const result = await this.database.query(
-      `WITH selected AS (SELECT id,opening_balance FROM investment_applications WHERE deleted_at IS NULL AND active=TRUE AND ($2::uuid IS NULL OR account_id=$2) AND ($3::uuid IS NULL OR id=$3)),
+      `WITH selected AS (SELECT id FROM investment_applications WHERE deleted_at IS NULL AND active=TRUE AND ($2::uuid IS NULL OR account_id=$2) AND ($3::uuid IS NULL OR id=$3)),
        movement AS (SELECT t.*,CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed_amount FROM investment_transactions t JOIN selected s ON s.id=t.application_id WHERE t.deleted_at IS NULL)
-       SELECT COALESCE((SELECT SUM(s.opening_balance+COALESCE((SELECT SUM(m.signed_amount) FROM movement m WHERE m.application_id=s.id AND m.occurred_at<=$1::date),0)) FROM selected s),0)::text AS "investedBalance",
+       SELECT COALESCE(SUM(signed_amount) FILTER(WHERE occurred_at<=$1::date),0)::text AS "investedBalance",
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='contribution' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS contributions,
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='withdrawal' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS withdrawals,
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='income' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS income
@@ -180,11 +160,8 @@ export class InvestmentsService {
   }
 
   async transactions(applicationId: string, month?: string) {
-    const app = await this.database.query<{
-      opening_balance: string;
-      reference_date: string;
-    }>(
-      `SELECT opening_balance::text FROM investment_applications WHERE id=$1 AND deleted_at IS NULL`,
+    const app = await this.database.query(
+      `SELECT id FROM investment_applications WHERE id=$1 AND deleted_at IS NULL`,
       [applicationId],
     );
     if (!app.rows[0]) throw new NotFoundException('Aplicação não encontrada.');
@@ -193,13 +170,12 @@ export class InvestmentsService {
       `WITH movements AS (SELECT t.id,t.application_id,t.transfer_id,t.occurred_at AS movement_date,to_char(t.occurred_at,'YYYY-MM-DD') AS "occurredAt",t.transaction_type AS type,t.amount::text AS amount,t.origin,t.notes,
        CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed,
         t.created_at FROM investment_transactions t WHERE t.application_id=$1 AND t.deleted_at IS NULL),
-       balances AS (SELECT m.*,($2::numeric+SUM(m.signed) OVER(ORDER BY m."occurredAt",m.created_at,m.id))::text AS balance FROM movements m)
+       balances AS (SELECT m.*,SUM(m.signed) OVER(ORDER BY m."occurredAt",m.created_at,m.id)::text AS balance FROM movements m)
        SELECT id,"occurredAt",type,amount,origin,notes,balance,transfer_id AS "transferId" FROM balances
-       WHERE ($3::date IS NULL OR movement_date>=date_trunc('month',$3::date)::date) AND ($4::date IS NULL OR movement_date<(date_trunc('month',$4::date)+INTERVAL '1 month'))
+       WHERE ($2::date IS NULL OR movement_date>=date_trunc('month',$2::date)::date) AND ($3::date IS NULL OR movement_date<(date_trunc('month',$3::date)+INTERVAL '1 month'))
        ORDER BY "occurredAt" ASC,created_at ASC,id ASC`,
       [
         applicationId,
-        app.rows[0].opening_balance,
         period ? `${period}-01` : null,
         period ? `${period}-01` : null,
       ],
@@ -211,8 +187,8 @@ export class InvestmentsService {
     applicationId: string,
     input: CreateInvestmentTransactionDto,
   ) {
-    if (input.type === 'income' && this.cents(input.amount) <= 0n)
-      throw new BadRequestException('O rendimento deve ser maior que zero.');
+    if (input.type !== 'adjustment' && this.cents(input.amount) <= 0n)
+      throw new BadRequestException('O valor da movimentação deve ser maior que zero.');
     if (input.type === 'adjustment' && this.cents(input.amount) === 0n)
       throw new BadRequestException('O ajuste deve ser diferente de zero.');
     if (
@@ -254,7 +230,7 @@ export class InvestmentsService {
           application_id: string;
           transfer_id: string | null;
           occurred_at: string;
-          transaction_type: 'income' | 'adjustment';
+          transaction_type: 'contribution' | 'withdrawal' | 'income' | 'adjustment';
           amount: string;
           origin: string | null;
           notes: string | null;
@@ -264,10 +240,6 @@ export class InvestmentsService {
         );
         const old = found.rows[0];
         if (!old) throw new NotFoundException('Movimentação não encontrada.');
-        if (old.transfer_id)
-          throw new BadRequestException(
-            'Aporte ou resgate vinculado deve ser alterado pela transferência no Livro Caixa.',
-          );
         const type = input.type ?? old.transaction_type;
         const amount = input.amount ?? old.amount;
         const notes =
@@ -277,7 +249,7 @@ export class InvestmentsService {
             ? old.origin
             : input.origin?.trim() || null;
         if (
-          (type === 'income' && this.cents(amount) <= 0n) ||
+          (type !== 'adjustment' && this.cents(amount) <= 0n) ||
           (type === 'adjustment' && this.cents(amount) === 0n)
         )
           throw new BadRequestException(
@@ -306,20 +278,11 @@ export class InvestmentsService {
 
   async removeTransaction(id: string) {
     const result = await this.database.query(
-      `UPDATE investment_transactions SET deleted_at=NOW(),updated_at=NOW() WHERE id=$1 AND deleted_at IS NULL AND transfer_id IS NULL RETURNING id`,
+      `UPDATE investment_transactions SET deleted_at=NOW(),updated_at=NOW() WHERE id=$1 AND deleted_at IS NULL RETURNING id`,
       [id],
     );
-    if (!result.rowCount) {
-      const found = await this.database.query(
-        'SELECT transfer_id FROM investment_transactions WHERE id=$1 AND deleted_at IS NULL',
-        [id],
-      );
-      if (found.rowCount)
-        throw new BadRequestException(
-          'Aporte ou resgate vinculado deve ser excluído pela transferência no Livro Caixa.',
-        );
+    if (!result.rowCount)
       throw new NotFoundException('Movimentação não encontrada.');
-    }
     return { deleted: true, id };
   }
 

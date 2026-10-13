@@ -23,7 +23,7 @@ export class InvestmentEvolutionService {
     const { from, to } = this.range(query);
     const result = await this.database.query(
       `WITH selected AS (
-         SELECT a.id,a.opening_balance,a.reference_date
+         SELECT a.id
          FROM investment_applications a
          WHERE a.deleted_at IS NULL AND ($3::uuid IS NULL OR a.account_id=$3) AND ($4::uuid IS NULL OR a.id=$4)
        ), months AS (
@@ -46,10 +46,8 @@ export class InvestmentEvolutionService {
          GROUP BY 1
        ), positions AS (
          SELECT mo.month_start,mo.month_end,
-           COALESCE((SELECT SUM(CASE WHEN mo.month_end<a.reference_date THEN 0::numeric ELSE a.opening_balance+COALESCE((
-             SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
-             FROM movements t WHERE t.application_id=a.id AND t.occurred_at>=a.reference_date AND t.occurred_at<=mo.month_end
-           ),0) END) FROM selected a),0) AS ending_balance
+           COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
+             FROM movements t WHERE t.application_id IN (SELECT id FROM selected) AND t.occurred_at<=mo.month_end),0) AS ending_balance
          FROM months mo
        )
        SELECT to_char(p.month_start,'YYYY-MM') AS month,
@@ -68,11 +66,9 @@ export class InvestmentEvolutionService {
     const rows = await this.monthly(query);
     const { from, to } = this.range(query);
     const opening = await this.database.query(
-      `SELECT COALESCE(SUM(CASE WHEN ($1::date-1)<a.reference_date THEN 0::numeric ELSE a.opening_balance+COALESCE((
-         SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
-         FROM investment_transactions t WHERE t.application_id=a.id AND t.deleted_at IS NULL AND t.occurred_at>=a.reference_date AND t.occurred_at<=$1::date-1
-       ),0) END),0)::numeric(14,2)::text AS balance
-       FROM investment_applications a WHERE a.deleted_at IS NULL AND ($2::uuid IS NULL OR a.account_id=$2) AND ($3::uuid IS NULL OR a.id=$3)`,
+      `SELECT COALESCE(SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END),0)::numeric(14,2)::text AS balance
+       FROM investment_transactions t JOIN investment_applications a ON a.id=t.application_id
+       WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND t.occurred_at<$1::date AND ($2::uuid IS NULL OR a.account_id=$2) AND ($3::uuid IS NULL OR a.id=$3)`,
       [`${from}-01`, query.accountId ?? null, query.applicationId ?? null],
     );
     const endBalance = rows.at(-1)?.endingBalance ?? '0.00';
