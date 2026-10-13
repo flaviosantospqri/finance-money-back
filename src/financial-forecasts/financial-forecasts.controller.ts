@@ -15,8 +15,10 @@ import {
   CloseForecastDto,
   CreateDestinationDto,
   CreateForecastDto,
+  CreateForecastGroupDto,
   DistributionDto,
   ReconcileForecastDto,
+  UpdateForecastGroupDto,
   UpdateForecastDto,
 } from './dto/forecast.dto.js';
 
@@ -32,6 +34,21 @@ export class FinancialForecastsController {
   }
   @Post('destinations') createDestination(@Body() body: CreateDestinationDto) {
     return this.forecasts.createDestination(body.name);
+  }
+  @Get('groups') groups() {
+    return this.forecasts.getGroups();
+  }
+  @Post('groups') createGroup(@Body() body: CreateForecastGroupDto) {
+    return this.forecasts.createGroup(body.name);
+  }
+  @Patch('groups/:id') updateGroup(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: UpdateForecastGroupDto,
+  ) {
+    return this.forecasts.updateGroup(id, body.name);
+  }
+  @Delete('groups/:id') deleteGroup(@Param('id', ParseUUIDPipe) id: string) {
+    return this.forecasts.deleteGroup(id);
   }
   @Get('distributions') distributions(@Query('period') period: string) {
     return this.forecasts.getDistributions(period);

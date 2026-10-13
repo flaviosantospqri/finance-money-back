@@ -19,6 +19,7 @@ type ForecastRow = {
   account_id: string | null;
   destination_id: string | null;
   notes: string | null;
+  group_id: string | null;
 };
 const sumMoney = (...values: string[]) => {
   const cents = values.reduce((sum, value) => {
@@ -53,6 +54,55 @@ const percentToHundredths = (value: string) => {
 @Injectable()
 export class FinancialForecastsService {
   constructor(private readonly db: DatabaseService) {}
+
+  async getGroups() {
+    const result = await this.db.query(
+      'SELECT id, name FROM forecast_groups ORDER BY name COLLATE "C", id',
+    );
+    return result.rows;
+  }
+
+  async createGroup(name: string) {
+    const normalized = name.trim();
+    if (!normalized) throw new BadRequestException('Informe o nome da aba.');
+    try {
+      const result = await this.db.query(
+        'INSERT INTO forecast_groups(name) VALUES($1) RETURNING id, name',
+        [normalized],
+      );
+      return result.rows[0];
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException('Já existe uma aba com esse nome.');
+      throw error;
+    }
+  }
+
+  async updateGroup(id: string, name: string) {
+    const normalized = name.trim();
+    if (!normalized) throw new BadRequestException('Informe o nome da aba.');
+    try {
+      const result = await this.db.query(
+        'UPDATE forecast_groups SET name=$2, updated_at=NOW() WHERE id=$1 RETURNING id, name',
+        [id, normalized],
+      );
+      if (!result.rowCount) throw new NotFoundException('Aba não encontrada.');
+      return result.rows[0];
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException('Já existe uma aba com esse nome.');
+      throw error;
+    }
+  }
+
+  async deleteGroup(id: string) {
+    const result = await this.db.query(
+      'DELETE FROM forecast_groups WHERE id=$1 RETURNING id',
+      [id],
+    );
+    if (!result.rowCount) throw new NotFoundException('Aba não encontrada.');
+    return { deleted: true };
+  }
 
   async findAll(filters: {
     period?: string;
@@ -94,7 +144,7 @@ export class FinancialForecastsService {
         SELECT f.id, f.series_id AS "seriesId", f.occurrence_index AS "occurrenceIndex", s.occurrence_count AS "occurrenceCount",
           f.kind, f.description, f.amount::text AS amount, to_char(f.due_date,'YYYY-MM-DD') AS "dueDate",
           f.category_id AS "categoryId", concat_ws(' / ', parent_category.name, c.name) AS "categoryName", category_destination.name AS "categoryDestinationName", f.account_id AS "accountId", a.name AS "accountName",
-          f.destination_id AS "destinationId", d.name AS "destinationName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
+          f.destination_id AS "destinationId", d.name AS "destinationName", f.group_id AS "groupId", fg.name AS "groupName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
           CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST(f.amount-COALESCE(r.realized,0),0)::text END AS pending,
           (COALESCE(r.realized,0)>f.amount) AS divergence, f.closed_at IS NOT NULL AS closed,
           CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR COALESCE(r.realized,0)>=f.amount THEN 'realized'
@@ -105,7 +155,7 @@ export class FinancialForecastsService {
         LEFT JOIN financial_categories parent_category ON parent_category.id=c.parent_category_id
         LEFT JOIN forecast_destinations category_destination ON category_destination.id=c.destination_id
         LEFT JOIN financial_accounts a ON a.id=f.account_id
-        LEFT JOIN forecast_destinations d ON d.id=f.destination_id LEFT JOIN reconciled r ON r.forecast_id=f.id
+        LEFT JOIN forecast_destinations d ON d.id=f.destination_id LEFT JOIN forecast_groups fg ON fg.id=f.group_id LEFT JOIN reconciled r ON r.forecast_id=f.id
         WHERE ${where.join(' AND ')}
       ) SELECT * FROM records ${filters.status ? `WHERE status = $${values.push(filters.status)}` : ''} ORDER BY "dueDate", description COLLATE "C", id`,
       values,
@@ -165,7 +215,7 @@ export class FinancialForecastsService {
       for (let index = 0; index < count; index += 1) {
         const dueDate = this.nextDate(input.dueDate, input.recurrence, index);
         const row = await client.query<{ id: string }>(
-          `INSERT INTO financial_forecasts(series_id,occurrence_index,kind,description,amount,due_date,category_id,account_id,destination_id,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+          `INSERT INTO financial_forecasts(series_id,occurrence_index,kind,description,amount,due_date,category_id,account_id,destination_id,notes,group_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
           [
             id,
             index + 1,
@@ -177,6 +227,7 @@ export class FinancialForecastsService {
             input.accountId || null,
             destinationId,
             input.notes?.trim() || null,
+            input.kind === 'expense' ? input.groupId || null : null,
           ],
         );
         created.push(row.rows[0].id);
@@ -200,6 +251,7 @@ export class FinancialForecastsService {
       destinationId: input.destinationId || current.destination_id,
       notes:
         input.notes === undefined ? current.notes : input.notes?.trim() || null,
+      groupId: input.groupId === undefined ? current.group_id : input.groupId || null,
     };
     await this.db.transaction(async (client) => {
       const valid = await client.query<{ destination_id: string }>(
@@ -231,9 +283,10 @@ export class FinancialForecastsService {
         data.accountId,
         data.destinationId,
         data.notes,
+        current.kind === 'expense' ? data.groupId : null,
       ];
       await client.query(
-        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${args.length + 5},account_id=$${args.length + 6},destination_id=$${args.length + 7},notes=$${args.length + 8},updated_at=NOW() WHERE ${predicate}`,
+        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${args.length + 5},account_id=$${args.length + 6},destination_id=$${args.length + 7},notes=$${args.length + 8},group_id=$${args.length + 9},updated_at=NOW() WHERE ${predicate}`,
         [...args, ...changes],
       );
     });
@@ -266,6 +319,7 @@ export class FinancialForecastsService {
       occurrenceCount: 1,
       destinationId: row.destination_id ?? undefined,
       notes: row.notes ?? undefined,
+      groupId: row.group_id ?? undefined,
     });
   }
 
@@ -557,7 +611,7 @@ export class FinancialForecastsService {
 
   private async getOccurrence(id: string, includeCancelled = false) {
     const result = await this.db.query<ForecastRow>(
-      `SELECT id,series_id,occurrence_index,due_date::text,kind,description,amount::text,category_id,account_id,destination_id,notes FROM financial_forecasts WHERE id=$1 AND deleted_at IS NULL AND ($2::boolean OR cancelled_at IS NULL)`,
+      `SELECT id,series_id,occurrence_index,due_date::text,kind,description,amount::text,category_id,account_id,destination_id,notes,group_id FROM financial_forecasts WHERE id=$1 AND deleted_at IS NULL AND ($2::boolean OR cancelled_at IS NULL)`,
       [id, includeCancelled],
     );
     if (!result.rows[0])

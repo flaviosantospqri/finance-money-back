@@ -24,6 +24,7 @@ export class CreateForecastDto {
     'once' | 'monthly' | 'weekly' | 'yearly';
   @IsInt() @Min(1) @Max(120) occurrenceCount!: number;
   @IsOptional() @IsUUID() destinationId?: string;
+  @IsOptional() @IsUUID() groupId?: string | null;
   @IsOptional() @IsString() @MaxLength(1000) notes?: string;
 }
 
@@ -37,6 +38,7 @@ export class UpdateForecastDto {
   @IsOptional() @IsUUID() categoryId?: string;
   @IsOptional() @IsUUID() accountId?: string;
   @IsOptional() @IsUUID() destinationId?: string;
+  @IsOptional() @IsUUID() groupId?: string | null;
   @IsOptional() @IsString() @MaxLength(1000) notes?: string;
 }
 
@@ -56,4 +58,12 @@ export class CloseForecastDto {
 
 export class CreateDestinationDto {
   @IsString() @MaxLength(100) name!: string;
+}
+
+export class CreateForecastGroupDto {
+  @IsString() @MaxLength(80) name!: string;
+}
+
+export class UpdateForecastGroupDto {
+  @IsString() @MaxLength(80) name!: string;
 }
