@@ -23,8 +23,8 @@ export class InvestmentsService {
       `SELECT a.id,a.name,a.account_id AS "accountId",fa.name AS "accountName",a.investment_type AS "investmentType",
         COALESCE(a.institution,fa.institution) AS institution,a.opening_balance::text AS "openingBalance",to_char(a.reference_date,'YYYY-MM-DD') AS "referenceDate",
         a.notes,a.active,a.deleted_at IS NOT NULL AS "deleted",
-        CASE WHEN CURRENT_DATE<a.reference_date THEN 0::numeric ELSE a.opening_balance+COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
-          FROM investment_transactions t WHERE t.application_id=a.id AND t.deleted_at IS NULL AND t.occurred_at>=a.reference_date AND t.occurred_at<=CURRENT_DATE),0) END::text AS balance
+        (a.opening_balance+COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
+          FROM investment_transactions t WHERE t.application_id=a.id AND t.deleted_at IS NULL AND t.occurred_at<=CURRENT_DATE),0))::text AS balance
        FROM investment_applications a JOIN financial_accounts fa ON fa.id=a.account_id
        WHERE a.deleted_at IS NULL AND ($1::boolean IS NULL OR a.active=$1) ORDER BY a.active DESC,a.name`,
       [active ?? null],
@@ -167,9 +167,9 @@ export class InvestmentsService {
     const [year, month] = query.month.split('-').map(Number);
     const endDate = `${query.month}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
     const result = await this.database.query(
-      `WITH selected AS (SELECT id,opening_balance,reference_date FROM investment_applications WHERE deleted_at IS NULL AND active=TRUE AND ($2::uuid IS NULL OR account_id=$2) AND ($3::uuid IS NULL OR id=$3)),
+      `WITH selected AS (SELECT id,opening_balance FROM investment_applications WHERE deleted_at IS NULL AND active=TRUE AND ($2::uuid IS NULL OR account_id=$2) AND ($3::uuid IS NULL OR id=$3)),
        movement AS (SELECT t.*,CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed_amount FROM investment_transactions t JOIN selected s ON s.id=t.application_id WHERE t.deleted_at IS NULL)
-       SELECT COALESCE((SELECT SUM(CASE WHEN $1::date<s.reference_date THEN 0::numeric ELSE s.opening_balance+COALESCE((SELECT SUM(m.signed_amount) FROM movement m WHERE m.application_id=s.id AND m.occurred_at>=s.reference_date AND m.occurred_at<=$1::date),0) END) FROM selected s),0)::text AS "investedBalance",
+       SELECT COALESCE((SELECT SUM(s.opening_balance+COALESCE((SELECT SUM(m.signed_amount) FROM movement m WHERE m.application_id=s.id AND m.occurred_at<=$1::date),0)) FROM selected s),0)::text AS "investedBalance",
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='contribution' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS contributions,
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='withdrawal' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS withdrawals,
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='income' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS income
@@ -184,23 +184,22 @@ export class InvestmentsService {
       opening_balance: string;
       reference_date: string;
     }>(
-      `SELECT opening_balance::text,to_char(reference_date,'YYYY-MM-DD') reference_date FROM investment_applications WHERE id=$1 AND deleted_at IS NULL`,
+      `SELECT opening_balance::text FROM investment_applications WHERE id=$1 AND deleted_at IS NULL`,
       [applicationId],
     );
     if (!app.rows[0]) throw new NotFoundException('Aplicação não encontrada.');
     const period = month && /^\d{4}-\d{2}$/.test(month) ? month : null;
     const result = await this.database.query(
       `WITH movements AS (SELECT t.id,t.application_id,t.transfer_id,t.occurred_at AS movement_date,to_char(t.occurred_at,'YYYY-MM-DD') AS "occurredAt",t.transaction_type AS type,t.amount::text AS amount,t.origin,t.notes,
-        CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed,
-        t.created_at FROM investment_transactions t WHERE t.application_id=$1 AND t.deleted_at IS NULL AND t.occurred_at >= $3::date),
+       CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed,
+        t.created_at FROM investment_transactions t WHERE t.application_id=$1 AND t.deleted_at IS NULL),
        balances AS (SELECT m.*,($2::numeric+SUM(m.signed) OVER(ORDER BY m."occurredAt",m.created_at,m.id))::text AS balance FROM movements m)
        SELECT id,"occurredAt",type,amount,origin,notes,balance,transfer_id AS "transferId" FROM balances
-       WHERE ($4::date IS NULL OR movement_date>=date_trunc('month',$4::date)::date) AND ($5::date IS NULL OR movement_date<(date_trunc('month',$5::date)+INTERVAL '1 month'))
+       WHERE ($3::date IS NULL OR movement_date>=date_trunc('month',$3::date)::date) AND ($4::date IS NULL OR movement_date<(date_trunc('month',$4::date)+INTERVAL '1 month'))
        ORDER BY "occurredAt" DESC,created_at DESC,id DESC`,
       [
         applicationId,
         app.rows[0].opening_balance,
-        app.rows[0].reference_date,
         period ? `${period}-01` : null,
         period ? `${period}-01` : null,
       ],
@@ -224,11 +223,7 @@ export class InvestmentsService {
       throw new BadRequestException('Informe uma justificativa para o ajuste.');
     try {
       return await this.database.transaction(async (client) => {
-        await this.assertApplicationDate(
-          client,
-          applicationId,
-          input.occurredAt,
-        );
+        await this.assertApplicationActive(client, applicationId);
         const result = await client.query(
           `INSERT INTO investment_transactions(application_id,occurred_at,transaction_type,amount,origin,notes) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,application_id AS "applicationId",to_char(occurred_at,'YYYY-MM-DD') AS "occurredAt",transaction_type AS type,amount::text,origin,notes`,
           [
@@ -292,11 +287,7 @@ export class InvestmentsService {
           throw new BadRequestException(
             'Informe uma justificativa para o ajuste.',
           );
-        await this.assertApplicationDate(
-          client,
-          old.application_id,
-          input.occurredAt ?? old.occurred_at,
-        );
+        await this.assertApplicationActive(client, old.application_id);
         const updated = await client.query(
           `UPDATE investment_transactions SET occurred_at=COALESCE($2::date,occurred_at),transaction_type=$3,amount=$4,origin=$5,notes=$6,updated_at=NOW() WHERE id=$1 RETURNING id,application_id AS "applicationId",to_char(occurred_at,'YYYY-MM-DD') AS "occurredAt",transaction_type AS type,amount::text,origin,notes`,
           [id, input.occurredAt ?? null, type, amount, origin, notes],
@@ -332,21 +323,13 @@ export class InvestmentsService {
     return { deleted: true, id };
   }
 
-  private async assertApplicationDate(
-    client: PoolClient,
-    id: string,
-    date: string,
-  ) {
-    const result = await client.query<{ reference_date: string }>(
-      `SELECT to_char(reference_date,'YYYY-MM-DD') reference_date FROM investment_applications WHERE id=$1 AND active=TRUE AND deleted_at IS NULL FOR UPDATE`,
+  private async assertApplicationActive(client: PoolClient, id: string) {
+    const result = await client.query(
+      `SELECT 1 FROM investment_applications WHERE id=$1 AND active=TRUE AND deleted_at IS NULL FOR UPDATE`,
       [id],
     );
-    if (!result.rows[0])
+    if (!result.rowCount)
       throw new NotFoundException('Aplicação ativa não encontrada.');
-    if (date < result.rows[0].reference_date)
-      throw new BadRequestException(
-        'A movimentação não pode ser anterior à data de referência da aplicação.',
-      );
   }
   private async assertInvestmentAccount(client: PoolClient, id: string) {
     const result = await client.query(

@@ -285,10 +285,9 @@ export class TransfersService {
       const apps = await client.query<{
         id: string;
         account_id: string;
-        reference_date: string;
         active: boolean;
       }>(
-        `SELECT id,account_id,to_char(reference_date,'YYYY-MM-DD') reference_date,active FROM investment_applications WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL FOR UPDATE`,
+        `SELECT id,account_id,active FROM investment_applications WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL FOR UPDATE`,
         [applicationIds],
       );
       if (
@@ -297,12 +296,11 @@ export class TransfersService {
           (app) =>
             !app.active ||
             app.account_id !==
-              (app.id === sourceApplicationId ? source : destination) ||
-            occurredAt < app.reference_date,
+              (app.id === sourceApplicationId ? source : destination),
         )
       ) {
         throw new BadRequestException(
-          'A aplicação selecionada deve estar ativa, pertencer à conta e ter data de referência anterior à transferência.',
+          'A aplicação selecionada deve estar ativa e pertencer à conta da transferência.',
         );
       }
     }
