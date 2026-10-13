@@ -53,6 +53,9 @@ export class InvestmentsController {
   ) {
     return this.investments.update(id, input);
   }
+  @Delete(':id') removeApplication(@Param('id') id: string) {
+    return this.investments.removeApplication(id);
+  }
   @Patch('transactions/:id') updateTransaction(
     @Param('id') id: string,
     @Body() input: UpdateInvestmentTransactionDto,

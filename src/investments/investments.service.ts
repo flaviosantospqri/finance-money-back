@@ -150,6 +150,19 @@ export class InvestmentsService {
     }
   }
 
+  async removeApplication(id: string) {
+    const result = await this.database.query(
+      `UPDATE investment_applications
+       SET deleted_at=NOW(),updated_at=NOW()
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING id`,
+      [id],
+    );
+    if (!result.rowCount)
+      throw new NotFoundException('Aplicação não encontrada.');
+    return { deleted: true, id };
+  }
+
   async summary(query: InvestmentQueryDto) {
     const [year, month] = query.month.split('-').map(Number);
     const endDate = `${query.month}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
