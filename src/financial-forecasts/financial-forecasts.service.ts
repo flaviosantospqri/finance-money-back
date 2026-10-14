@@ -272,21 +272,23 @@ export class FinancialForecastsService {
       const dateExpression =
         scope === 'future'
           ? `due_date + ($${args.length + 3}::date - $${args.length + 4}::date)`
-          : `$${args.length + 4}::date`;
+          : `$${args.length + 3}::date`;
       const changes = [
         data.description,
         data.amount,
         ...(scope === 'future'
           ? [data.dueDate, current.due_date]
-          : [id, data.dueDate]),
+          : [data.dueDate]),
         data.categoryId,
         data.accountId,
         data.destinationId,
         data.notes,
         current.kind === 'expense' ? data.groupId : null,
       ];
+      const categoryParameter =
+        args.length + (scope === 'future' ? 5 : 4);
       await client.query(
-        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${args.length + 5},account_id=$${args.length + 6},destination_id=$${args.length + 7},notes=$${args.length + 8},group_id=$${args.length + 9},updated_at=NOW() WHERE ${predicate}`,
+        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${categoryParameter},account_id=$${categoryParameter + 1},destination_id=$${categoryParameter + 2},notes=$${categoryParameter + 3},group_id=$${categoryParameter + 4},updated_at=NOW() WHERE ${predicate}`,
         [...args, ...changes],
       );
     });
