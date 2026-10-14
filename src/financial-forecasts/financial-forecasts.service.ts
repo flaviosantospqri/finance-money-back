@@ -516,16 +516,19 @@ export class FinancialForecastsService {
          ORDER BY destination_id,effective_from DESC
        ), configured AS (
          SELECT destination_id,BOOL_OR(effective_from<=$1) AS has_started FROM financial_repasses GROUP BY destination_id
+         ), has_global_rules AS (
+           SELECT EXISTS(SELECT 1 FROM global_repasses) AS configured
        ), targets AS (
          SELECT d.id,d.name,COALESCE(fd.value_type,gr.value_type,'percentage') AS value_type,
-           COALESCE(fd.value,gr.value,CASE WHEN COALESCE(c.has_started,FALSE) THEN 0::numeric ELSE
+             COALESCE(fd.value,gr.value,CASE WHEN h.configured OR COALESCE(c.has_started,FALSE) THEN 0::numeric ELSE
              CASE d.name WHEN 'Casa/Lazer' THEN 70 WHEN 'Investimentos' THEN 10 WHEN 'Flávio' THEN 10 WHEN 'Laura' THEN 10 ELSE 0 END END) AS allocation_value
          FROM forecast_destinations d
          LEFT JOIN forecast_distributions fd ON fd.destination_id=d.id AND fd.period=$1
          LEFT JOIN global_repasses gr ON gr.destination_id=d.id
          LEFT JOIN configured c ON c.destination_id=d.id
+           CROSS JOIN has_global_rules h
            WHERE d.active=TRUE
-             AND (fd.destination_id IS NOT NULL OR gr.destination_id IS NOT NULL OR NOT COALESCE(c.has_started,FALSE))
+             AND (fd.destination_id IS NOT NULL OR gr.destination_id IS NOT NULL OR (NOT h.configured AND NOT COALESCE(c.has_started,FALSE)))
        )
        SELECT d.id,d.name,d.value_type AS "valueType",d.allocation_value::text AS value,
          CASE WHEN d.value_type='percentage' THEN d.allocation_value ELSE 0 END::text AS percentage,
