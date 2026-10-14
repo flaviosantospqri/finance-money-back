@@ -17,7 +17,7 @@ Na inicialização, a API aplica as migrações SQL pendentes. A migração inic
 - `/financial-accounts`: consulta e cadastro de contas, com saldo e data de referência.
 - `/financial-categories`: consulta e cadastro de categorias de receita e despesa.
 
-O frontend usa `/api` em desenvolvimento, encaminhado pelo proxy do Vite para a API local. Configure `VITE_API_BASE_URL` para a URL direta da API quando publicar o frontend. `FRONTEND_ORIGIN` limita o CORS da API; no desenvolvimento pode ficar em `http://localhost:5173`.
+O frontend usa `/api` em desenvolvimento, encaminhado pelo proxy do Vite para a API local. Configure `VITE_API_BASE_URL` para a URL direta da API quando publicar o frontend. A API permite o frontend local e `https://finance-money-front.vercel.app`; `FRONTEND_ORIGIN` adiciona outras origens permitidas, separadas por vírgulas.
 
 ## Verificação
 
