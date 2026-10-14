@@ -21,6 +21,7 @@ import { cashBookEntryOrderSchema } from './migrations/007-cash-book-entry-order
 import { categoryHierarchySchema } from './migrations/008-category-hierarchy.js';
 import { forecastGroupsSchema } from './migrations/009-forecast-groups.js';
 import { investmentLedgerOnlySchema } from './migrations/010-investment-ledger-only.js';
+import { globalRepassesSourceSchema } from './migrations/011-global-repasses-source.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -171,6 +172,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['010-investment-ledger-only'],
         );
         this.logger.log('Applied database migration 010-investment-ledger-only.');
+      }
+      const globalRepassesSourceApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['011-global-repasses-source'],
+      );
+      if (globalRepassesSourceApplied.rowCount === 0) {
+        await client.query(globalRepassesSourceSchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['011-global-repasses-source'],
+        );
+        this.logger.log('Applied database migration 011-global-repasses-source.');
       }
       await client.query('COMMIT');
     } catch (error) {

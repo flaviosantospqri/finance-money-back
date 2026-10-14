@@ -524,7 +524,8 @@ export class FinancialForecastsService {
          LEFT JOIN forecast_distributions fd ON fd.destination_id=d.id AND fd.period=$1
          LEFT JOIN global_repasses gr ON gr.destination_id=d.id
          LEFT JOIN configured c ON c.destination_id=d.id
-         WHERE d.active=TRUE
+           WHERE d.active=TRUE
+             AND (fd.destination_id IS NOT NULL OR gr.destination_id IS NOT NULL OR NOT COALESCE(c.has_started,FALSE))
        )
        SELECT d.id,d.name,d.value_type AS "valueType",d.allocation_value::text AS value,
          CASE WHEN d.value_type='percentage' THEN d.allocation_value ELSE 0 END::text AS percentage,

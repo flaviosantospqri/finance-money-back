@@ -32,6 +32,7 @@ export class RepassesService {
         [destinationId, input.valueType, input.value, input.effectiveFrom, input.effectiveTo || null],
       );
       if (input.valueType === 'percentage') await this.rebalancePercentages(client, input.effectiveFrom, destinationId, this.toBasisPoints(input.value), input.effectiveTo ?? null);
+      await this.clearMonthlyOverridesFrom(client, input.effectiveFrom);
       return { ...result.rows[0], name: input.name.trim() };
     });
   }
@@ -80,6 +81,7 @@ export class RepassesService {
         );
         if (input.valueType === 'percentage') await this.rebalancePercentages(client, input.effectiveFrom, destinationId, this.toBasisPoints(input.value), effectiveTo);
         else if (previous.value_type === 'percentage') await this.rebalanceExistingPercentages(client, input.effectiveFrom, destinationId);
+        await this.clearMonthlyOverridesFrom(client, input.effectiveFrom);
         return { ...result.rows[0], name: input.name.trim(), historyPreserved: true };
       }
 
@@ -90,6 +92,7 @@ export class RepassesService {
       );
       if (input.valueType === 'percentage') await this.rebalancePercentages(client, input.effectiveFrom, destinationId, this.toBasisPoints(input.value), effectiveTo);
       else if (previous.value_type === 'percentage') await this.rebalanceExistingPercentages(client, input.effectiveFrom, destinationId);
+      await this.clearMonthlyOverridesFrom(client, input.effectiveFrom);
       return { ...result.rows[0], name: input.name.trim() };
     });
   }
@@ -111,6 +114,7 @@ export class RepassesService {
         await client.query('UPDATE financial_repasses SET deleted_at=NOW(),updated_at=NOW() WHERE id=$1', [id]);
       }
       await this.rebalanceExistingPercentages(client, row.effective_from > currentPeriod ? row.effective_from : currentPeriod, row.destination_id);
+      await this.clearMonthlyOverridesFrom(client, row.effective_from > currentPeriod ? row.effective_from : currentPeriod);
       return { deleted: true };
     });
   }
@@ -194,6 +198,10 @@ export class RepassesService {
     }
     const created = await client.query<{ id: string }>('INSERT INTO forecast_destinations(name) VALUES($1) RETURNING id', [name.trim()]);
     return created.rows[0].id;
+  }
+
+  private async clearMonthlyOverridesFrom(client: import('pg').PoolClient, period: string) {
+    await client.query('DELETE FROM forecast_distributions WHERE period >= $1', [period]);
   }
 
   private async assertNoOverlap(client: import('pg').PoolClient, destinationId: string, from: string, to: string | null, excludingId?: string) {
