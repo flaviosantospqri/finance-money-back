@@ -52,12 +52,24 @@ export class RepassesService {
       if (input.effectiveFrom < previous.effective_from || (previous.effective_to && input.effectiveFrom > previous.effective_to))
         throw new BadRequestException('A nova vigência precisa permanecer dentro do período já configurado.');
 
-      const destinationId = await this.destination(client, input.name);
+      const duplicateDestination = await client.query<{ id: string }>(
+        'SELECT id FROM forecast_destinations WHERE lower(name)=lower($1) AND id<>$2 LIMIT 1',
+        [input.name.trim(), previous.destination_id],
+      );
+      if (duplicateDestination.rowCount)
+        throw new ConflictException(
+          'Já existe outra destinação com esse nome. Use um nome diferente para manter os vínculos existentes.',
+        );
+      const destinationId = previous.destination_id;
+      if (input.name.trim() !== previous.name)
+        await client.query(
+          'UPDATE forecast_destinations SET name=$2,active=TRUE WHERE id=$1',
+          [destinationId, input.name.trim()],
+        );
       const effectiveTo = Object.prototype.hasOwnProperty.call(input, 'effectiveTo')
         ? input.effectiveTo ?? null
         : previous.effective_to;
       await this.assertNoOverlap(client, destinationId, input.effectiveFrom, input.effectiveTo ?? null, id);
-      const sameDestination = destinationId === previous.destination_id;
       if (input.effectiveFrom > previous.effective_from) {
         const priorEnd = this.previousPeriod(input.effectiveFrom);
         await client.query('UPDATE financial_repasses SET effective_to=$2,updated_at=NOW() WHERE id=$1', [id, priorEnd]);
@@ -68,7 +80,6 @@ export class RepassesService {
         );
         if (input.valueType === 'percentage') await this.rebalancePercentages(client, input.effectiveFrom, destinationId, this.toBasisPoints(input.value), effectiveTo);
         else if (previous.value_type === 'percentage') await this.rebalanceExistingPercentages(client, input.effectiveFrom, destinationId);
-        if (previous.destination_id !== destinationId) await this.rebalanceExistingPercentages(client, input.effectiveFrom, previous.destination_id);
         return { ...result.rows[0], name: input.name.trim(), historyPreserved: true };
       }
 
@@ -79,9 +90,6 @@ export class RepassesService {
       );
       if (input.valueType === 'percentage') await this.rebalancePercentages(client, input.effectiveFrom, destinationId, this.toBasisPoints(input.value), effectiveTo);
       else if (previous.value_type === 'percentage') await this.rebalanceExistingPercentages(client, input.effectiveFrom, destinationId);
-      if (previous.destination_id !== destinationId) await this.rebalanceExistingPercentages(client, input.effectiveFrom, previous.destination_id);
-      if (!sameDestination && previous.effective_from < currentPeriod)
-        throw new BadRequestException('Para renomear um repasse com histórico, crie uma nova vigência a partir deste mês.');
       return { ...result.rows[0], name: input.name.trim() };
     });
   }
