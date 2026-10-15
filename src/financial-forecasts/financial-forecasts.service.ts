@@ -568,21 +568,50 @@ export class FinancialForecastsService {
         throw new BadRequestException('Informe valores de repasse válidos.');
       if (row.valueType !== 'fixed') percentToHundredths(value);
     }
-    return this.db.transaction(async (client) => {
-      await client.query('DELETE FROM forecast_distributions WHERE period=$1', [
-        period,
-      ]);
-      for (const row of entries) {
-        const valueType = row.valueType ?? 'percentage';
-        const value = row.value ?? row.percentage ?? '0';
-        const percentage = valueType === 'percentage' ? value : '0';
-        await client.query(
-          'INSERT INTO forecast_distributions(period,destination_id,percentage,value_type,value) VALUES($1,$2,$3,$4,$5)',
-          [period, row.destinationId, percentage, valueType, value],
+    const useGlobalRules = period >= this.currentPeriod();
+    await this.db.transaction(async (client) => {
+      if (useGlobalRules) {
+        const destinations = await client.query<{ id: string }>(
+          'SELECT id FROM forecast_destinations WHERE id=ANY($1::uuid[]) AND active=TRUE',
+          [entries.map((row) => row.destinationId)],
         );
+        if (destinations.rowCount !== entries.length)
+          throw new BadRequestException('Uma ou mais destinações não estão mais disponíveis. Recarregue a página.');
+
+        const previousPeriod = this.previousPeriod(period);
+        await client.query(
+          `UPDATE financial_repasses SET effective_to=$2,updated_at=NOW()
+           WHERE deleted_at IS NULL AND effective_from<$1 AND (effective_to IS NULL OR effective_to>=$1)`,
+          [period, previousPeriod],
+        );
+        await client.query(
+          `UPDATE financial_repasses SET deleted_at=NOW(),updated_at=NOW()
+           WHERE deleted_at IS NULL AND effective_from >= $1`,
+          [period],
+        );
+        await client.query('DELETE FROM forecast_distributions WHERE period >= $1', [period]);
+        for (const row of entries) {
+          const valueType = row.valueType ?? 'percentage';
+          const value = row.value ?? row.percentage ?? '0';
+          await client.query(
+            'INSERT INTO financial_repasses(destination_id,value_type,value,effective_from) VALUES($1,$2,$3,$4)',
+            [row.destinationId, valueType, value, period],
+          );
+        }
+      } else {
+        await client.query('DELETE FROM forecast_distributions WHERE period=$1', [period]);
+        for (const row of entries) {
+          const valueType = row.valueType ?? 'percentage';
+          const value = row.value ?? row.percentage ?? '0';
+          const percentage = valueType === 'percentage' ? value : '0';
+          await client.query(
+            'INSERT INTO forecast_distributions(period,destination_id,percentage,value_type,value) VALUES($1,$2,$3,$4,$5)',
+            [period, row.destinationId, percentage, valueType, value],
+          );
+        }
       }
-      return this.getDistributions(period);
     });
+    return this.getDistributions(period);
   }
 
   async copyDistributions(period: string, targetPeriod: string) {
@@ -602,17 +631,15 @@ export class FinancialForecastsService {
       throw new BadRequestException(
         'Salve uma distribuição que totalize 100% antes de copiar.',
       );
-    await this.db.transaction(async (client) => {
-      await client.query('DELETE FROM forecast_distributions WHERE period=$1', [
-        targetPeriod,
-      ]);
-      for (const row of source as { id: string; percentage: string; valueType: 'percentage' | 'fixed'; value: string }[])
-        await client.query(
-          'INSERT INTO forecast_distributions(period,destination_id,percentage,value_type,value) VALUES($1,$2,$3,$4,$5)',
-          [targetPeriod, row.id, row.valueType === 'percentage' ? row.value : '0', row.valueType, row.value],
-        );
-    });
-    return this.getDistributions(targetPeriod);
+    return this.saveDistributions(
+      targetPeriod,
+      (source as { id: string; percentage: string; valueType: 'percentage' | 'fixed'; value: string }[]).map((row) => ({
+        destinationId: row.id,
+        percentage: row.percentage,
+        valueType: row.valueType,
+        value: row.value,
+      })),
+    );
   }
 
   private async getOccurrence(id: string, includeCancelled = false) {
@@ -623,6 +650,17 @@ export class FinancialForecastsService {
     if (!result.rows[0])
       throw new NotFoundException('Previsão não encontrada.');
     return result.rows[0];
+  }
+
+  private currentPeriod() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  private previousPeriod(period: string) {
+    const [year, month] = period.split('-').map(Number);
+    const date = new Date(Date.UTC(year, month - 2, 1));
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
   }
 
   private nextDate(start: string, recurrence: string, index: number) {
