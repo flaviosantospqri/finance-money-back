@@ -6,7 +6,19 @@ import { InvestmentEvolutionQueryDto } from './dto/investment-evolution-query.dt
 export class InvestmentEvolutionService {
   constructor(private readonly database: DatabaseService) {}
 
-  private range(query: InvestmentEvolutionQueryDto) {
+  private async range(query: InvestmentEvolutionQueryDto) {
+    if (query.allTime === 'true') {
+      const result = await this.database.query<{ fromMonth: string | null; toMonth: string }>(
+        `SELECT to_char(date_trunc('month',MIN(t.occurred_at)),'YYYY-MM') AS "fromMonth",
+           to_char(date_trunc('month',CURRENT_DATE),'YYYY-MM') AS "toMonth"
+         FROM investment_transactions t JOIN investment_applications a ON a.id=t.application_id
+         WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL
+           AND ($1::uuid IS NULL OR a.account_id=$1) AND ($2::uuid IS NULL OR a.id=$2)`,
+        [query.accountId ?? null, query.applicationId ?? null],
+      );
+      const currentMonth = result.rows[0]?.toMonth ?? new Date().toISOString().slice(0, 7);
+      return { from: result.rows[0]?.fromMonth ?? currentMonth, to: currentMonth };
+    }
     const year = query.year ?? new Date().getFullYear().toString();
     const from = query.fromMonth ?? `${year}-01`;
     const to = query.toMonth ?? `${year}-12`;
@@ -20,7 +32,7 @@ export class InvestmentEvolutionService {
   }
 
   async monthly(query: InvestmentEvolutionQueryDto) {
-    const { from, to } = this.range(query);
+    const { from, to } = await this.range(query);
     const result = await this.database.query(
       `WITH selected AS (
          SELECT a.id
@@ -66,7 +78,7 @@ export class InvestmentEvolutionService {
 
   async summary(query: InvestmentEvolutionQueryDto) {
     const rows = await this.monthly(query);
-    const { from, to } = this.range(query);
+    const { from, to } = await this.range(query);
     const opening = await this.database.query(
       `SELECT COALESCE(SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type IN ('withdrawal','refund') THEN -t.amount ELSE t.amount END),0)::numeric(14,2)::text AS balance
        FROM investment_transactions t JOIN investment_applications a ON a.id=t.application_id
