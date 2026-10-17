@@ -15,6 +15,11 @@ export class CashBookController {
     return this.cashBook.summary(query.accountId, query.month);
   }
 
+  @Get('analytics')
+  analytics(@Query('fromMonth') fromMonth = '', @Query('toMonth') toMonth = '') {
+    return this.cashBook.analytics(fromMonth, toMonth);
+  }
+
   @Get()
   findAll(@Query() filters: CashBookQueryDto) {
     return this.cashBook.findAll(filters);

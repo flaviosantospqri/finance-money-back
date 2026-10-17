@@ -137,6 +137,51 @@ export class CashBookService {
     };
   }
 
+  async analytics(fromMonth: string, toMonth: string) {
+    const monthPattern = /^\d{4}-(0[1-9]|1[0-2])$/;
+    if (!monthPattern.test(fromMonth) || !monthPattern.test(toMonth) || fromMonth > toMonth)
+      throw new BadRequestException('Informe um período mensal válido.');
+    const result = await this.database.query(
+      `WITH months AS (
+         SELECT month_start::date AS month_start
+         FROM generate_series(date_trunc('month',$1::date),date_trunc('month',$2::date),INTERVAL '1 month') month_start
+       ), entries AS (
+         SELECT date_trunc('month',e.occurred_at)::date AS month_start,e.entry_type,e.amount,
+           e.category_id AS "categoryId",c.name AS "categoryName",c.parent_category_id AS "parentCategoryId",
+           parent.name AS "parentCategoryName",
+           concat_ws(' ',c.name,parent.name,e.description) AS searchable_text
+         FROM cash_book_entries e
+         LEFT JOIN financial_categories c ON c.id=e.category_id
+         LEFT JOIN financial_categories parent ON parent.id=c.parent_category_id
+         WHERE e.deleted_at IS NULL AND e.entry_type IN ('income','expense')
+           AND e.occurred_at>=date_trunc('month',$1::date)
+           AND e.occurred_at<date_trunc('month',$2::date)+INTERVAL '1 month'
+       ), monthly AS (
+         SELECT month_start,
+           COALESCE(SUM(amount) FILTER(WHERE entry_type='income'),0) AS income,
+           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense'),0) AS expenses,
+           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense' AND searchable_text ~* '(d[ií]vida|empr[eé]stimo|financiamento|parcelamento|parcela)'),0) AS debt_payments
+         FROM entries GROUP BY month_start
+       ), category_expenses AS (
+         SELECT month_start,"categoryId","categoryName","parentCategoryId","parentCategoryName",SUM(amount) AS amount
+         FROM entries WHERE entry_type='expense' GROUP BY month_start,"categoryId","categoryName","parentCategoryId","parentCategoryName"
+       )
+       SELECT json_build_object('monthly',COALESCE((
+           SELECT json_agg(json_build_object('month',to_char(m.month_start,'YYYY-MM'),'income',COALESCE(t.income,0)::numeric(14,2)::text,
+             'expenses',COALESCE(t.expenses,0)::numeric(14,2)::text,'net',(COALESCE(t.income,0)-COALESCE(t.expenses,0))::numeric(14,2)::text,
+             'debtPayments',COALESCE(t.debt_payments,0)::numeric(14,2)::text) ORDER BY m.month_start)
+           FROM months m LEFT JOIN monthly t USING(month_start)
+         ),'[]'::json),
+         'categoryExpenses',COALESCE((
+           SELECT json_agg(json_build_object('month',to_char(month_start,'YYYY-MM'),'categoryId',"categoryId",'categoryName',"categoryName",
+             'parentCategoryId',"parentCategoryId",'parentCategoryName',"parentCategoryName",'amount',amount::numeric(14,2)::text)
+             ORDER BY month_start,"parentCategoryName" NULLS FIRST,"categoryName") FROM category_expenses
+         ),'[]'::json)) AS data`,
+      [`${fromMonth}-01`, `${toMonth}-01`],
+    );
+    return result.rows[0]?.data ?? { monthly: [], categoryExpenses: [] };
+  }
+
   async findOne(id: string) {
     const result = await this.database.query(
       `SELECT e.id, e.transfer_id AS "transferId", e.account_id AS "accountId", a.name AS "accountName",
