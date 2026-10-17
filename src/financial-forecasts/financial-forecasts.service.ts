@@ -267,6 +267,7 @@ export class FinancialForecastsService {
       throw new BadRequestException('Só é possível copiar previsões do mês imediatamente anterior.');
 
     return this.db.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`financial-forecast-copy:${targetPeriod}`]);
       const source = await client.query<ForecastRow>(
         `SELECT f.id, f.series_id, f.occurrence_index, f.due_date::text, f.kind, f.description, f.amount::text,
           f.category_id, f.account_id, f.destination_id, f.notes, f.group_id, f.amount_type, f.percentage::text
