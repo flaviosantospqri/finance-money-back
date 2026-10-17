@@ -53,6 +53,12 @@ const percentToHundredths = (value: string) => {
   return amount;
 };
 
+// Percentual previsto para investimentos é alocação patrimonial, não despesa operacional.
+const isInvestmentAllocation = (forecast: Record<string, string>) =>
+  forecast.kind === 'expense' &&
+  forecast.amountType === 'income_percentage' &&
+  /(^|\W)investimentos?(\W|$)/i.test(forecast.categoryName ?? '');
+
 @Injectable()
 export class FinancialForecastsService {
   constructor(private readonly db: DatabaseService) {}
@@ -362,7 +368,9 @@ export class FinancialForecastsService {
       ...byKind('income').map((f: Record<string, string>) => f.amount),
     );
     const expense = sumMoney(
-      ...byKind('expense').map((f: Record<string, string>) => f.amount),
+      ...byKind('expense')
+        .filter((f: Record<string, string>) => !isInvestmentAllocation(f))
+        .map((f: Record<string, string>) => f.amount),
     );
     const committed = sumMoney(
       ...byKind('expense').map((f: Record<string, string>) => f.pending),
