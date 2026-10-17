@@ -22,6 +22,7 @@ import { categoryHierarchySchema } from './migrations/008-category-hierarchy.js'
 import { forecastGroupsSchema } from './migrations/009-forecast-groups.js';
 import { investmentLedgerOnlySchema } from './migrations/010-investment-ledger-only.js';
 import { globalRepassesSourceSchema } from './migrations/011-global-repasses-source.js';
+import { investmentRefundSchema } from './migrations/012-investment-refund.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -184,6 +185,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['011-global-repasses-source'],
         );
         this.logger.log('Applied database migration 011-global-repasses-source.');
+      }
+      const investmentRefundApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['012-investment-refund'],
+      );
+      if (investmentRefundApplied.rowCount === 0) {
+        await client.query(investmentRefundSchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['012-investment-refund'],
+        );
+        this.logger.log('Applied database migration 012-investment-refund.');
       }
       await client.query('COMMIT');
     } catch (error) {

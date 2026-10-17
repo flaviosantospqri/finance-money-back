@@ -23,7 +23,7 @@ export class InvestmentsService {
       `SELECT a.id,a.name,a.account_id AS "accountId",fa.name AS "accountName",a.investment_type AS "investmentType",
         COALESCE(a.institution,fa.institution) AS institution,
         a.notes,a.active,a.deleted_at IS NOT NULL AS "deleted",
-        COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
+        COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type IN ('withdrawal','refund') THEN -t.amount ELSE t.amount END)
           FROM investment_transactions t WHERE t.application_id=a.id AND t.deleted_at IS NULL AND t.occurred_at<=CURRENT_DATE),0)::text AS balance
        FROM investment_applications a JOIN financial_accounts fa ON fa.id=a.account_id
        WHERE a.deleted_at IS NULL AND ($1::boolean IS NULL OR a.active=$1) ORDER BY a.active DESC,a.name`,
@@ -148,10 +148,11 @@ export class InvestmentsService {
     const endDate = `${query.month}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
     const result = await this.database.query(
       `WITH selected AS (SELECT id FROM investment_applications WHERE deleted_at IS NULL AND active=TRUE AND ($2::uuid IS NULL OR account_id=$2) AND ($3::uuid IS NULL OR id=$3)),
-       movement AS (SELECT t.*,CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed_amount FROM investment_transactions t JOIN selected s ON s.id=t.application_id WHERE t.deleted_at IS NULL)
+       movement AS (SELECT t.*,CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type IN ('withdrawal','refund') THEN -t.amount ELSE t.amount END signed_amount FROM investment_transactions t JOIN selected s ON s.id=t.application_id WHERE t.deleted_at IS NULL)
        SELECT COALESCE(SUM(signed_amount) FILTER(WHERE occurred_at<=$1::date),0)::text AS "investedBalance",
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='contribution' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS contributions,
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='withdrawal' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS withdrawals,
+       COALESCE(SUM(amount) FILTER(WHERE transaction_type='refund' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS refunds,
        COALESCE(SUM(amount) FILTER(WHERE transaction_type='income' AND occurred_at>=date_trunc('month',$1::date)::date AND occurred_at<=$1::date),0)::text AS income
        FROM movement`,
       [endDate, query.accountId ?? null, query.applicationId ?? null],
@@ -168,7 +169,7 @@ export class InvestmentsService {
     const period = month && /^\d{4}-\d{2}$/.test(month) ? month : null;
     const result = await this.database.query(
       `WITH movements AS (SELECT t.id,t.application_id,t.transfer_id,t.occurred_at AS movement_date,to_char(t.occurred_at,'YYYY-MM-DD') AS "occurredAt",t.transaction_type AS type,t.amount::text AS amount,t.origin,t.notes,
-       CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END signed,
+       CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type IN ('withdrawal','refund') THEN -t.amount ELSE t.amount END signed,
         t.created_at FROM investment_transactions t WHERE t.application_id=$1 AND t.deleted_at IS NULL),
        balances AS (SELECT m.*,SUM(m.signed) OVER(ORDER BY m."occurredAt",m.created_at,m.id)::text AS balance FROM movements m)
        SELECT id,"occurredAt",type,amount,origin,notes,balance,transfer_id AS "transferId" FROM balances
@@ -230,7 +231,7 @@ export class InvestmentsService {
           application_id: string;
           transfer_id: string | null;
           occurred_at: string;
-          transaction_type: 'contribution' | 'withdrawal' | 'income' | 'adjustment';
+          transaction_type: 'contribution' | 'withdrawal' | 'refund' | 'income' | 'adjustment';
           amount: string;
           origin: string | null;
           notes: string | null;

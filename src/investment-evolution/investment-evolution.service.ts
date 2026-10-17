@@ -41,18 +41,20 @@ export class InvestmentEvolutionService {
          SELECT date_trunc('month',m.occurred_at)::date AS month_start,
            SUM(m.amount) FILTER(WHERE m.transaction_type='contribution' AND NOT COALESCE(i.is_internal,FALSE)) AS contributions,
            SUM(m.amount) FILTER(WHERE m.transaction_type='withdrawal' AND NOT COALESCE(i.is_internal,FALSE)) AS withdrawals,
+           SUM(m.amount) FILTER(WHERE m.transaction_type='refund' AND NOT COALESCE(i.is_internal,FALSE)) AS refunds,
            SUM(m.amount) FILTER(WHERE m.transaction_type='income') AS income
          FROM movements m LEFT JOIN internal_transfer i ON i.id=m.id
          GROUP BY 1
        ), positions AS (
          SELECT mo.month_start,mo.month_end,
-           COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END)
+           COALESCE((SELECT SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type IN ('withdrawal','refund') THEN -t.amount ELSE t.amount END)
              FROM movements t WHERE t.application_id IN (SELECT id FROM selected) AND t.occurred_at<=mo.month_end),0) AS ending_balance
          FROM months mo
        )
        SELECT to_char(p.month_start,'YYYY-MM') AS month,
          COALESCE(f.contributions,0)::numeric(14,2)::text AS contributions,
          COALESCE(f.withdrawals,0)::numeric(14,2)::text AS withdrawals,
+         COALESCE(f.refunds,0)::numeric(14,2)::text AS refunds,
          COALESCE(f.income,0)::numeric(14,2)::text AS income,
          p.ending_balance::numeric(14,2)::text AS "endingBalance"
        FROM positions p LEFT JOIN monthly_flows f USING(month_start)
@@ -66,7 +68,7 @@ export class InvestmentEvolutionService {
     const rows = await this.monthly(query);
     const { from, to } = this.range(query);
     const opening = await this.database.query(
-      `SELECT COALESCE(SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type='withdrawal' THEN -t.amount ELSE t.amount END),0)::numeric(14,2)::text AS balance
+      `SELECT COALESCE(SUM(CASE WHEN t.transaction_type IN ('contribution','income') THEN t.amount WHEN t.transaction_type IN ('withdrawal','refund') THEN -t.amount ELSE t.amount END),0)::numeric(14,2)::text AS balance
        FROM investment_transactions t JOIN investment_applications a ON a.id=t.application_id
        WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND t.occurred_at<$1::date AND ($2::uuid IS NULL OR a.account_id=$2) AND ($3::uuid IS NULL OR a.id=$3)`,
       [`${from}-01`, query.accountId ?? null, query.applicationId ?? null],
@@ -78,6 +80,7 @@ export class InvestmentEvolutionService {
            COALESCE(x.source_application_id IN (SELECT id FROM investment_applications WHERE deleted_at IS NULL AND ($3::uuid IS NULL OR account_id=$3) AND ($4::uuid IS NULL OR id=$4)),FALSE)
            AND COALESCE(x.destination_application_id IN (SELECT id FROM investment_applications WHERE deleted_at IS NULL AND ($3::uuid IS NULL OR account_id=$3) AND ($4::uuid IS NULL OR id=$4)),FALSE)
          )),0)::numeric(14,2)::text AS contributions
+         ,COALESCE(SUM(t.amount) FILTER(WHERE t.transaction_type='refund'),0)::numeric(14,2)::text AS refunds
        FROM investment_transactions t JOIN investment_applications a ON a.id=t.application_id
        LEFT JOIN cash_book_transfers x ON x.id=t.transfer_id AND x.deleted_at IS NULL
        WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND t.occurred_at>=date_trunc('month',$1::date) AND t.occurred_at<(date_trunc('month',$2::date)+INTERVAL '1 month')
@@ -92,6 +95,7 @@ export class InvestmentEvolutionService {
       endingBalance: endBalance,
       openingBalance: opening.rows[0]?.balance ?? '0.00',
       contributions: totals.rows[0]?.contributions ?? '0.00',
+      refunds: totals.rows[0]?.refunds ?? '0.00',
       income: totals.rows[0]?.income ?? '0.00',
       variation: this.fromCents(closeCents - openCents),
     };
