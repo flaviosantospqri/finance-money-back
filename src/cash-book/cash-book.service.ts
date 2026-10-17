@@ -161,7 +161,7 @@ export class CashBookService {
        ), monthly AS (
          SELECT month_start,
            COALESCE(SUM(amount) FILTER(WHERE entry_type='income'),0) AS income,
-           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense' AND NOT is_investment),0) AS expenses,
+           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense'),0) AS expenses,
            COALESCE(SUM(amount) FILTER(WHERE entry_type='expense' AND NOT is_investment AND searchable_text ~* '(d[ií]vida|empr[eé]stimo|financiamento|parcelamento|parcela)'),0) AS debt_payments
          FROM entries GROUP BY month_start
        ), category_expenses AS (
