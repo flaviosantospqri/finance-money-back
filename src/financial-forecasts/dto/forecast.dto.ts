@@ -60,6 +60,11 @@ export class DistributionDto {
   @IsString() @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) targetPeriod!: string;
 }
 
+export class CopyForecastsMonthDto {
+  @IsString() @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) period!: string;
+  @IsString() @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) targetPeriod!: string;
+}
+
 export class CloseForecastDto {
   @IsString() @MaxLength(500) reason!: string;
 }

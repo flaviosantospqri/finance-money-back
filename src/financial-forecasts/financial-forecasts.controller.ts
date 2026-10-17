@@ -14,6 +14,7 @@ import {
 import { FinancialForecastsService } from './financial-forecasts.service.js';
 import {
   CloseForecastDto,
+  CopyForecastsMonthDto,
   CreateDestinationDto,
   CreateForecastDto,
   CreateForecastGroupDto,
@@ -53,6 +54,9 @@ export class FinancialForecastsController {
   }
   @Get('distributions') distributions(@Query('period') period: string) {
     return this.forecasts.getDistributions(period);
+  }
+  @Post('copy-month') copyMonth(@Body() body: CopyForecastsMonthDto) {
+    return this.forecasts.copyMonth(body.period, body.targetPeriod);
   }
   @Put('distributions/:period') saveDistributions(
     @Param('period') period: string,

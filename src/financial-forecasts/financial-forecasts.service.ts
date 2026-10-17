@@ -262,6 +262,62 @@ export class FinancialForecastsService {
     });
   }
 
+  async copyMonth(period: string, targetPeriod: string) {
+    if (this.previousPeriod(targetPeriod) !== period)
+      throw new BadRequestException('Só é possível copiar previsões do mês imediatamente anterior.');
+
+    return this.db.transaction(async (client) => {
+      const source = await client.query<ForecastRow>(
+        `SELECT f.id, f.series_id, f.occurrence_index, f.due_date::text, f.kind, f.description, f.amount::text,
+          f.category_id, f.account_id, f.destination_id, f.notes, f.group_id, f.amount_type, f.percentage::text
+         FROM financial_forecasts f
+         WHERE to_char(f.due_date, 'YYYY-MM')=$1 AND f.deleted_at IS NULL AND f.cancelled_at IS NULL
+         ORDER BY f.due_date, f.id`,
+        [period],
+      );
+      let copied = 0;
+      let skipped = 0;
+      const [year, month] = targetPeriod.split('-').map(Number);
+
+      for (const row of source.rows) {
+        const day = Number(row.due_date.slice(8, 10));
+        const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+        const dueDate = `${targetPeriod}-${String(Math.min(day, lastDay)).padStart(2, '0')}`;
+        const exists = await client.query(
+          `SELECT 1 FROM financial_forecasts
+           WHERE due_date=$1::date AND deleted_at IS NULL AND cancelled_at IS NULL
+             AND (series_id=$12 OR (kind=$2 AND description=$3 AND amount=$4::numeric AND category_id=$5
+             AND account_id IS NOT DISTINCT FROM $6::uuid
+             AND destination_id IS NOT DISTINCT FROM $7::uuid
+             AND notes IS NOT DISTINCT FROM $8::text
+             AND group_id IS NOT DISTINCT FROM $9::uuid
+             AND amount_type=$10 AND percentage IS NOT DISTINCT FROM $11::numeric))
+           LIMIT 1`,
+          [dueDate, row.kind, row.description, row.amount, row.category_id, row.account_id,
+            row.destination_id, row.notes, row.group_id, row.amount_type, row.percentage, row.series_id],
+        );
+        if (exists.rowCount) {
+          skipped += 1;
+          continue;
+        }
+
+        const series = await client.query<{ id: string }>(
+          `INSERT INTO financial_forecast_series(kind, description, amount, start_date, category_id, account_id, recurrence, occurrence_count, notes)
+           VALUES($1,$2,$3,$4,$5,$6,'once',1,$7) RETURNING id`,
+          [row.kind, row.description, row.amount, dueDate, row.category_id, row.account_id, row.notes],
+        );
+        await client.query(
+          `INSERT INTO financial_forecasts(series_id, occurrence_index, kind, description, amount, due_date, category_id, account_id, destination_id, notes, group_id, amount_type, percentage)
+           VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          [series.rows[0].id, row.kind, row.description, row.amount, dueDate, row.category_id,
+            row.account_id, row.destination_id, row.notes, row.group_id, row.amount_type, row.percentage],
+        );
+        copied += 1;
+      }
+      return { copied, skipped, sourceCount: source.rowCount ?? 0 };
+    });
+  }
+
   async update(
     id: string,
     input: UpdateForecastDto,
