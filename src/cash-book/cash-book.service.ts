@@ -149,6 +149,8 @@ export class CashBookService {
          SELECT date_trunc('month',e.occurred_at)::date AS month_start,e.entry_type,e.amount,
            e.category_id AS "categoryId",c.name AS "categoryName",c.parent_category_id AS "parentCategoryId",
            parent.name AS "parentCategoryName",
+           (lower(trim(COALESCE(c.name,''))) IN ('investimento','investimentos','aporte','aportes')
+             OR lower(trim(COALESCE(parent.name,''))) IN ('investimento','investimentos','aporte','aportes')) AS is_investment,
            concat_ws(' ',c.name,parent.name,e.description) AS searchable_text
          FROM cash_book_entries e
          LEFT JOIN financial_categories c ON c.id=e.category_id
@@ -159,12 +161,12 @@ export class CashBookService {
        ), monthly AS (
          SELECT month_start,
            COALESCE(SUM(amount) FILTER(WHERE entry_type='income'),0) AS income,
-           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense'),0) AS expenses,
-           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense' AND searchable_text ~* '(d[ií]vida|empr[eé]stimo|financiamento|parcelamento|parcela)'),0) AS debt_payments
+           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense' AND NOT is_investment),0) AS expenses,
+           COALESCE(SUM(amount) FILTER(WHERE entry_type='expense' AND NOT is_investment AND searchable_text ~* '(d[ií]vida|empr[eé]stimo|financiamento|parcelamento|parcela)'),0) AS debt_payments
          FROM entries GROUP BY month_start
        ), category_expenses AS (
          SELECT month_start,"categoryId","categoryName","parentCategoryId","parentCategoryName",SUM(amount) AS amount
-         FROM entries WHERE entry_type='expense' GROUP BY month_start,"categoryId","categoryName","parentCategoryId","parentCategoryName"
+         FROM entries WHERE entry_type='expense' AND NOT is_investment GROUP BY month_start,"categoryId","categoryName","parentCategoryId","parentCategoryName"
        )
        SELECT json_build_object('monthly',COALESCE((
            SELECT json_agg(json_build_object('month',to_char(m.month_start,'YYYY-MM'),'income',COALESCE(t.income,0)::numeric(14,2)::text,
