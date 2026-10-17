@@ -15,6 +15,8 @@ export class CreateForecastDto {
   @IsIn(['income', 'expense']) kind!: 'income' | 'expense';
   @IsString() @MaxLength(160) description!: string;
   @Matches(/^\d{1,12}(\.\d{1,2})?$/) amount!: string;
+  @IsOptional() @IsIn(['fixed', 'income_percentage']) amountType?: 'fixed' | 'income_percentage';
+  @IsOptional() @Matches(/^(100(\.0{1,2})?|\d{1,2}(\.\d{1,2})?)$/) percentage?: string;
   @IsDateString({ strict: true })
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
   dueDate!: string;
@@ -31,6 +33,8 @@ export class CreateForecastDto {
 export class UpdateForecastDto {
   @IsOptional() @IsString() @MaxLength(160) description?: string;
   @IsOptional() @Matches(/^\d{1,12}(\.\d{1,2})?$/) amount?: string;
+  @IsOptional() @IsIn(['fixed', 'income_percentage']) amountType?: 'fixed' | 'income_percentage';
+  @IsOptional() @Matches(/^(100(\.0{1,2})?|\d{1,2}(\.\d{1,2})?)$/) percentage?: string;
   @IsOptional()
   @IsDateString({ strict: true })
   @Matches(/^\d{4}-\d{2}-\d{2}$/)

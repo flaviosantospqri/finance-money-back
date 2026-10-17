@@ -20,6 +20,8 @@ type ForecastRow = {
   destination_id: string | null;
   notes: string | null;
   group_id: string | null;
+  amount_type: 'fixed' | 'income_percentage';
+  percentage: string | null;
 };
 const sumMoney = (...values: string[]) => {
   const cents = values.reduce((sum, value) => {
@@ -140,24 +142,33 @@ export class FinancialForecastsService {
         SELECT r.forecast_id, SUM(COALESCE(r.amount, e.amount)) AS realized, MAX(e.occurred_at) AS realized_at
         FROM forecast_reconciliations r JOIN cash_book_entries e ON e.id=r.cash_book_entry_id AND e.deleted_at IS NULL
         WHERE r.deleted_at IS NULL GROUP BY r.forecast_id
+      ), monthly_income AS (
+        SELECT date_trunc('month', due_date)::date AS month, SUM(amount) AS amount
+        FROM financial_forecasts
+        WHERE kind='income' AND deleted_at IS NULL AND cancelled_at IS NULL
+        GROUP BY date_trunc('month', due_date)::date
       ), records AS (
         SELECT f.id, f.series_id AS "seriesId", f.occurrence_index AS "occurrenceIndex", s.occurrence_count AS "occurrenceCount",
-          f.kind, f.description, f.amount::text AS amount, to_char(f.due_date,'YYYY-MM-DD') AS "dueDate",
+          f.kind, f.description,
+          CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END AS calculated_amount,
+          f.amount_type AS "amountType", f.percentage::text AS percentage,
+          to_char(f.due_date,'YYYY-MM-DD') AS "dueDate",
           f.category_id AS "categoryId", concat_ws(' / ', parent_category.name, c.name) AS "categoryName", category_destination.name AS "categoryDestinationName", f.account_id AS "accountId", a.name AS "accountName",
           f.destination_id AS "destinationId", d.name AS "destinationName", f.group_id AS "groupId", fg.name AS "groupName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
-          CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST(f.amount-COALESCE(r.realized,0),0)::text END AS pending,
-          (COALESCE(r.realized,0)>f.amount) AS divergence, f.closed_at IS NOT NULL AS closed,
-          CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR COALESCE(r.realized,0)>=f.amount THEN 'realized'
+          CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)-COALESCE(r.realized,0),0)::text END AS pending,
+          (COALESCE(r.realized,0)>(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) AS divergence, f.closed_at IS NOT NULL AS closed,
+          CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR ((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)>0 AND COALESCE(r.realized,0)>=(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) THEN 'realized'
             WHEN COALESCE(r.realized,0)>0 THEN 'partial'
             WHEN f.due_date < CURRENT_DATE THEN 'overdue' ELSE 'pending' END AS status
         FROM financial_forecasts f JOIN financial_forecast_series s ON s.id=f.series_id
+        LEFT JOIN monthly_income mi ON mi.month=date_trunc('month',f.due_date)::date
         JOIN financial_categories c ON c.id=f.category_id
         LEFT JOIN financial_categories parent_category ON parent_category.id=c.parent_category_id
         LEFT JOIN forecast_destinations category_destination ON category_destination.id=c.destination_id
         LEFT JOIN financial_accounts a ON a.id=f.account_id
         LEFT JOIN forecast_destinations d ON d.id=f.destination_id LEFT JOIN forecast_groups fg ON fg.id=f.group_id LEFT JOIN reconciled r ON r.forecast_id=f.id
         WHERE ${where.join(' AND ')}
-      ) SELECT * FROM records ${filters.status ? `WHERE status = $${values.push(filters.status)}` : ''} ORDER BY "dueDate", description COLLATE "C", id`,
+      ) SELECT records.*, calculated_amount::text AS amount FROM records ${filters.status ? `WHERE status = $${values.push(filters.status)}` : ''} ORDER BY "dueDate", description COLLATE "C", id`,
       values,
     );
     return result.rows;
@@ -175,10 +186,15 @@ export class FinancialForecastsService {
   }
 
   async create(input: CreateForecastDto) {
-    if (!input.description.trim() || Number(input.amount) <= 0)
+    const amountType = input.amountType || 'fixed';
+    const percentage = input.percentage || null;
+    if (!input.description.trim() || (amountType === 'fixed' && Number(input.amount) <= 0))
       throw new BadRequestException(
         'Informe uma descrição e um valor maior que zero.',
       );
+    if (amountType === 'income_percentage' && (input.kind !== 'expense' || !percentage || Number(percentage) <= 0 || Number(percentage) > 100))
+      throw new BadRequestException('Informe uma despesa e um percentual válido sobre os recebimentos.');
+    const storedAmount = amountType === 'income_percentage' ? '0.01' : input.amount;
     if (input.recurrence !== 'once' && input.occurrenceCount < 2)
       throw new BadRequestException(
         'Uma recorrência precisa ter ao menos duas ocorrências.',
@@ -194,17 +210,19 @@ export class FinancialForecastsService {
           'A categoria não corresponde ao tipo da previsão.',
         );
       const series = await client.query<{ id: string }>(
-        `INSERT INTO financial_forecast_series(kind,description,amount,start_date,category_id,account_id,recurrence,occurrence_count,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+        `INSERT INTO financial_forecast_series(kind,description,amount,start_date,category_id,account_id,recurrence,occurrence_count,notes,amount_type,percentage) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
         [
           input.kind,
           input.description.trim(),
-          input.amount,
+          storedAmount,
           input.dueDate,
           input.categoryId,
           input.accountId || null,
           input.recurrence,
           count,
           input.notes?.trim() || null,
+          amountType,
+          percentage,
         ],
       );
       const id = series.rows[0].id;
@@ -215,19 +233,21 @@ export class FinancialForecastsService {
       for (let index = 0; index < count; index += 1) {
         const dueDate = this.nextDate(input.dueDate, input.recurrence, index);
         const row = await client.query<{ id: string }>(
-          `INSERT INTO financial_forecasts(series_id,occurrence_index,kind,description,amount,due_date,category_id,account_id,destination_id,notes,group_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+          `INSERT INTO financial_forecasts(series_id,occurrence_index,kind,description,amount,due_date,category_id,account_id,destination_id,notes,group_id,amount_type,percentage) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
           [
             id,
             index + 1,
             input.kind,
             input.description.trim(),
-            input.amount,
+            storedAmount,
             dueDate,
             input.categoryId,
             input.accountId || null,
             destinationId,
             input.notes?.trim() || null,
             input.kind === 'expense' ? input.groupId || null : null,
+            amountType,
+            percentage,
           ],
         );
         created.push(row.rows[0].id);
@@ -245,6 +265,8 @@ export class FinancialForecastsService {
     const data = {
       description: input.description?.trim() || current.description,
       amount: input.amount || current.amount,
+      amountType: input.amountType || current.amount_type,
+      percentage: input.percentage === undefined ? current.percentage : input.percentage,
       dueDate: input.dueDate || current.due_date,
       categoryId: input.categoryId || current.category_id,
       accountId: input.accountId || current.account_id,
@@ -253,6 +275,8 @@ export class FinancialForecastsService {
         input.notes === undefined ? current.notes : input.notes?.trim() || null,
       groupId: input.groupId === undefined ? current.group_id : input.groupId || null,
     };
+    if (data.amountType === 'income_percentage' && (current.kind !== 'expense' || !data.percentage || Number(data.percentage) <= 0 || Number(data.percentage) > 100))
+      throw new BadRequestException('Informe um percentual válido entre 0 e 100%.');
     await this.db.transaction(async (client) => {
       const valid = await client.query<{ destination_id: string }>(
         'SELECT id, destination_id FROM financial_categories WHERE id=$1 AND nature=$2 AND active=TRUE',
@@ -275,7 +299,7 @@ export class FinancialForecastsService {
           : `$${args.length + 3}::date`;
       const changes = [
         data.description,
-        data.amount,
+        data.amountType === 'income_percentage' ? '0.01' : data.amount,
         ...(scope === 'future'
           ? [data.dueDate, current.due_date]
           : [data.dueDate]),
@@ -288,8 +312,8 @@ export class FinancialForecastsService {
       const categoryParameter =
         args.length + (scope === 'future' ? 5 : 4);
       await client.query(
-        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${categoryParameter},account_id=$${categoryParameter + 1},destination_id=$${categoryParameter + 2},notes=$${categoryParameter + 3},group_id=$${categoryParameter + 4},updated_at=NOW() WHERE ${predicate}`,
-        [...args, ...changes],
+        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${categoryParameter},account_id=$${categoryParameter + 1},destination_id=$${categoryParameter + 2},notes=$${categoryParameter + 3},group_id=$${categoryParameter + 4},amount_type=$${categoryParameter + 5},percentage=$${categoryParameter + 6},updated_at=NOW() WHERE ${predicate}`,
+        [...args, ...changes, data.amountType, data.percentage],
       );
     });
     return this.findOne(id);
@@ -313,7 +337,9 @@ export class FinancialForecastsService {
     return this.create({
       kind: row.kind as 'income' | 'expense',
       description: row.description,
-      amount: row.amount,
+      amount: row.amount_type === 'income_percentage' ? '0.01' : row.amount,
+      amountType: row.amount_type,
+      percentage: row.percentage ?? undefined,
       dueDate: row.due_date,
       categoryId: row.category_id,
       accountId: row.account_id ?? undefined,
@@ -644,7 +670,7 @@ export class FinancialForecastsService {
 
   private async getOccurrence(id: string, includeCancelled = false) {
     const result = await this.db.query<ForecastRow>(
-      `SELECT id,series_id,occurrence_index,due_date::text,kind,description,amount::text,category_id,account_id,destination_id,notes,group_id FROM financial_forecasts WHERE id=$1 AND deleted_at IS NULL AND ($2::boolean OR cancelled_at IS NULL)`,
+      `SELECT id,series_id,occurrence_index,due_date::text,kind,description,amount::text,category_id,account_id,destination_id,notes,group_id,amount_type,percentage::text FROM financial_forecasts WHERE id=$1 AND deleted_at IS NULL AND ($2::boolean OR cancelled_at IS NULL)`,
       [id, includeCancelled],
     );
     if (!result.rows[0])

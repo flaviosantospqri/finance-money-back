@@ -23,6 +23,7 @@ import { forecastGroupsSchema } from './migrations/009-forecast-groups.js';
 import { investmentLedgerOnlySchema } from './migrations/010-investment-ledger-only.js';
 import { globalRepassesSourceSchema } from './migrations/011-global-repasses-source.js';
 import { investmentRefundSchema } from './migrations/012-investment-refund.js';
+import { forecastIncomePercentageSchema } from './migrations/013-forecast-income-percentage.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -197,6 +198,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['012-investment-refund'],
         );
         this.logger.log('Applied database migration 012-investment-refund.');
+      }
+      const forecastIncomePercentageApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['013-forecast-income-percentage'],
+      );
+      if (forecastIncomePercentageApplied.rowCount === 0) {
+        await client.query(forecastIncomePercentageSchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['013-forecast-income-percentage'],
+        );
+        this.logger.log('Applied database migration 013-forecast-income-percentage.');
       }
       await client.query('COMMIT');
     } catch (error) {
