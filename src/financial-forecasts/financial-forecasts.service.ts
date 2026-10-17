@@ -486,27 +486,25 @@ export class FinancialForecastsService {
            SELECT f.id,f.description,f.category_id,f.kind,f.due_date,
              CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE((SELECT SUM(i.amount) FROM financial_forecasts i WHERE i.kind='income' AND i.deleted_at IS NULL AND i.cancelled_at IS NULL AND date_trunc('month',i.due_date)=date_trunc('month',f.due_date)),0)*f.percentage/100,2) ELSE f.amount END AS target_amount
            FROM financial_forecasts f WHERE f.id=$1
-         )
-         SELECT e.id,e.description,e.amount::text AS amount,to_char(e.occurred_at,'YYYY-MM-DD') AS "occurredAt",e.entry_type AS type,a.name AS "accountName",c.name AS "categoryName",fc.name AS "forecastCategoryName",(e.category_id=t.category_id) AS "categoryMatch",(
+         ), candidates AS (
+         SELECT e.id,e.description,e.amount::text AS amount,to_char(e.occurred_at,'YYYY-MM-DD') AS "occurredAt",e.entry_type AS type,a.name AS "accountName",c.name AS "categoryName",fc.name AS "forecastCategoryName",(e.category_id=t.category_id) AS category_match,(
            SELECT COUNT(*)::int FROM (
              SELECT token FROM regexp_split_to_table(regexp_replace(lower(t.description),'[^[:alnum:]]+',' ','g'),'\\s+') AS forecast_tokens(token)
              INTERSECT
              SELECT token FROM regexp_split_to_table(regexp_replace(lower(e.description),'[^[:alnum:]]+',' ','g'),'\\s+') AS entry_tokens(token)
            ) shared_tokens WHERE length(token)>2
-         ) AS "nameMatch",ABS(e.amount-t.target_amount)::text AS "difference",ABS(e.occurred_at-t.due_date)::int AS "daysDifference"
+         ) AS name_match,ABS(e.amount-t.target_amount) AS amount_difference,ABS(e.occurred_at-t.due_date)::int AS days_difference
          FROM target t
          JOIN financial_categories fc ON fc.id=t.category_id
          JOIN cash_book_entries e ON e.entry_type=$2 AND e.deleted_at IS NULL
          LEFT JOIN financial_categories c ON c.id=e.category_id
          JOIN financial_accounts a ON a.id=e.account_id
          WHERE NOT EXISTS(SELECT 1 FROM forecast_reconciliations r WHERE r.cash_book_entry_id=e.id AND r.deleted_at IS NULL)
-         ORDER BY ((e.category_id=t.category_id)::int*100 + (
-           SELECT COUNT(*) FROM (
-             SELECT token FROM regexp_split_to_table(regexp_replace(lower(t.description),'[^[:alnum:]]+',' ','g'),'\\s+') AS forecast_tokens(token)
-             INTERSECT
-             SELECT token FROM regexp_split_to_table(regexp_replace(lower(e.description),'[^[:alnum:]]+',' ','g'),'\\s+') AS entry_tokens(token)
-           ) shared_tokens WHERE length(token)>2
-         )) DESC,ABS(e.amount-t.target_amount),ABS(e.occurred_at-t.due_date) LIMIT 100`,
+         )
+         SELECT id,description,amount,"occurredAt",type,"accountName","categoryName","forecastCategoryName",category_match AS "categoryMatch",name_match AS "nameMatch",amount_difference::text AS difference,days_difference AS "daysDifference"
+         FROM candidates
+         ORDER BY CASE WHEN category_match AND name_match>0 THEN 2 WHEN name_match>0 THEN 1 WHEN category_match THEN 0 ELSE -1 END DESC,name_match DESC,amount_difference,days_difference
+         LIMIT 100`,
         [id, f.kind],
       )
     ).rows;
