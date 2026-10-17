@@ -503,7 +503,7 @@ export class FinancialForecastsService {
          )
          SELECT id,description,amount,"occurredAt",type,"accountName","categoryName","forecastCategoryName",category_match AS "categoryMatch",name_match AS "nameMatch",amount_difference::text AS difference,days_difference AS "daysDifference"
          FROM candidates
-         ORDER BY CASE WHEN category_match AND name_match>0 THEN 2 WHEN name_match>0 THEN 1 WHEN category_match THEN 0 ELSE -1 END DESC,name_match DESC,amount_difference,days_difference
+         ORDER BY CASE WHEN category_match AND name_match>0 THEN 2 WHEN name_match>0 THEN 1 WHEN category_match THEN 0 ELSE -1 END DESC,amount_difference,name_match DESC,days_difference
          LIMIT 100`,
         [id, f.kind],
       )
