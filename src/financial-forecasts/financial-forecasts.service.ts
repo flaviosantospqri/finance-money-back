@@ -613,7 +613,7 @@ export class FinancialForecastsService {
        ), targets AS (
          SELECT d.id,d.name,COALESCE(fd.value_type,gr.value_type,'percentage') AS value_type,
              COALESCE(fd.value,gr.value,CASE WHEN h.configured OR COALESCE(c.has_started,FALSE) THEN 0::numeric ELSE
-             CASE d.name WHEN 'Casa/Lazer' THEN 70 WHEN 'Investimentos' THEN 10 WHEN 'Flávio' THEN 10 WHEN 'Laura' THEN 10 ELSE 0 END END) AS allocation_value
+             CASE d.name WHEN 'Despesas gerais' THEN 70 WHEN 'Investimentos' THEN 10 WHEN 'Flávio' THEN 10 WHEN 'Laura' THEN 10 ELSE 0 END END) AS allocation_value
          FROM forecast_destinations d
          LEFT JOIN forecast_distributions fd ON fd.destination_id=d.id AND fd.period=$1
          LEFT JOIN global_repasses gr ON gr.destination_id=d.id
@@ -630,7 +630,7 @@ export class FinancialForecastsService {
            WHERE c.destination_id=d.id AND e.entry_type='expense' AND e.deleted_at IS NULL
              AND to_char(e.occurred_at,'YYYY-MM')=$1),0)::numeric(14,2)::text AS consumed
        FROM targets d CROSS JOIN income_total
-       ORDER BY CASE d.name WHEN 'Casa/Lazer' THEN 1 WHEN 'Investimentos' THEN 2 WHEN 'Flávio' THEN 3 WHEN 'Laura' THEN 4 WHEN 'Outras' THEN 5 ELSE 6 END,d.name`,
+       ORDER BY CASE d.name WHEN 'Despesas gerais' THEN 1 WHEN 'Investimentos' THEN 2 WHEN 'Flávio' THEN 3 WHEN 'Laura' THEN 4 WHEN 'Outras' THEN 5 ELSE 6 END,d.name`,
       [period],
     );
     return result.rows;
