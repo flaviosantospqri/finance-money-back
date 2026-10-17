@@ -476,6 +476,42 @@ export class FinancialForecastsService {
     }
   }
 
+  async reconcileMany(id: string, entryIds: string[]) {
+    if (entryIds.length === 0 || new Set(entryIds).size !== entryIds.length)
+      throw new BadRequestException('Selecione movimentações diferentes.');
+    const forecast = await this.getOccurrence(id);
+    try {
+      const links = await this.db.transaction(async (client) => {
+        const entries = await client.query<{ id: string; entry_type: string }>(
+          'SELECT id,entry_type FROM cash_book_entries WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL FOR UPDATE',
+          [entryIds],
+        );
+        if (entries.rows.length !== entryIds.length)
+          throw new NotFoundException('Uma ou mais movimentações não foram encontradas.');
+        if (entries.rows.some((entry) => entry.entry_type !== forecast.kind))
+          throw new BadRequestException(
+            'A natureza de uma ou mais movimentações não corresponde à previsão.',
+          );
+        const inserted = [];
+        for (const entryId of entryIds) {
+          const row = await client.query<{ id: string }>(
+            'INSERT INTO forecast_reconciliations(forecast_id,cash_book_entry_id) VALUES($1,$2) RETURNING id',
+            [id, entryId],
+          );
+          inserted.push({ ...row.rows[0], entryId });
+        }
+        return inserted;
+      });
+      return { forecastId: id, reconciliations: links };
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505')
+        throw new ConflictException(
+          'Uma ou mais movimentações já estão vinculadas a uma previsão.',
+        );
+      throw error;
+    }
+  }
+
   async unlink(id: string, reconciliationId: string) {
     const result = await this.db.query(
       'UPDATE forecast_reconciliations SET deleted_at=NOW() WHERE id=$1 AND forecast_id=$2 AND deleted_at IS NULL RETURNING id',

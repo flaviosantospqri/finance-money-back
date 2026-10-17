@@ -1,5 +1,8 @@
 import {
   IsDateString,
+  IsArray,
+  ArrayMinSize,
+  ArrayUnique,
   IsIn,
   IsInt,
   IsOptional,
@@ -47,7 +50,8 @@ export class UpdateForecastDto {
 }
 
 export class ReconcileForecastDto {
-  @IsUUID() entryId!: string;
+  @IsOptional() @IsUUID() entryId?: string;
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayUnique() @IsUUID('4', { each: true }) entryIds?: string[];
   @IsOptional() @Matches(/^\d{1,12}(\.\d{1,2})?$/) amount?: string;
 }
 

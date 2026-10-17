@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -92,6 +93,10 @@ export class FinancialForecastsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: ReconcileForecastDto,
   ) {
+    if (body.entryIds?.length)
+      return this.forecasts.reconcileMany(id, body.entryIds);
+    if (!body.entryId)
+      throw new BadRequestException('Selecione ao menos uma movimentação.');
     return this.forecasts.reconcile(id, body.entryId, body.amount);
   }
   @Delete(':id/reconciliations/:reconciliationId') unlink(
