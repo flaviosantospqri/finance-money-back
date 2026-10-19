@@ -30,7 +30,7 @@ describe('Financial forecasts (e2e)', () => {
         transform: true,
       }),
     );
-    await app.init();
+    await app.listen(0);
   });
 
   afterEach(async () => {
@@ -257,6 +257,117 @@ describe('Financial forecasts (e2e)', () => {
         Number(row.percentage),
       ]),
     );
+  });
+
+  it('sincroniza repasses percentuais nas duas direções e rebalanceia as maiores fatias', async () => {
+    const api = request(app.getHttpServer());
+    const period = '1900-01';
+    distributionPeriods.push(period);
+    const initial = await api
+      .get(`/financial-forecasts/distributions?period=${period}`)
+      .expect(200);
+    const investment = initial.body.find((row: { name: string }) => row.name === 'Investimentos') as { id: string; name: string };
+    expect(investment).toBeDefined();
+
+    const category = await api.post('/financial-categories').send({
+      name: `Repasse Investimentos-${randomUUID()}`,
+      nature: 'expense',
+      destinationId: investment.id,
+    }).expect(201);
+    categoryIds.push(category.body.id as string);
+
+    const setInvestmentShare = async (percentage: string) => {
+      const current = await api
+        .get(`/financial-forecasts/distributions?period=${period}`)
+        .expect(200);
+      const largest = current.body
+        .filter((row: { id: string; valueType: string }) => row.id !== investment.id && row.valueType === 'percentage')
+        .sort((left: { value: string; name: string }, right: { value: string; name: string }) =>
+          Number(right.value) - Number(left.value) || left.name.localeCompare(right.name, 'pt-BR'))[0];
+      const delta = Number(percentage) - Number(current.body.find((row: { id: string }) => row.id === investment.id).value);
+      return current.body.map((row: { id: string; valueType: 'percentage' | 'fixed'; value: string }) => ({
+        destinationId: row.id,
+        valueType: row.valueType,
+        value: row.id === investment.id
+          ? percentage
+          : row.id === largest.id
+            ? (Number(row.value) - delta).toFixed(2)
+            : row.value,
+      }));
+    };
+    await api.put(`/financial-forecasts/distributions/${period}`)
+      .send({ entries: await setInvestmentShare('15.00') }).expect(200);
+
+    const seededDistribution = await api.get(`/financial-forecasts/distributions?period=${period}`).expect(200);
+    const largestOther = seededDistribution.body
+      .filter((row: { id: string; valueType: string }) => row.id !== investment.id && row.valueType === 'percentage')
+      .sort((left: { value: string; name: string }, right: { value: string; name: string }) =>
+        Number(right.value) - Number(left.value) || left.name.localeCompare(right.name, 'pt-BR'))[0] as { id: string; value: string };
+    const otherCategory = await api.post('/financial-categories').send({
+      name: `Repasse Outra Destinação-${randomUUID()}`,
+      nature: 'expense',
+      destinationId: largestOther.id,
+    }).expect(201);
+    categoryIds.push(otherCategory.body.id as string);
+
+    const createRepasse = async (description: string, categoryId: string, percentage: string) => {
+      const response = await api.post('/financial-forecasts').send({
+        kind: 'expense',
+        description,
+        amount: '0.01',
+        amountType: 'income_percentage',
+        percentage,
+        dueDate: '1900-01-15',
+        categoryId,
+        recurrence: 'monthly',
+        occurrenceCount: 3,
+      }).expect(201);
+      seriesIds.push(response.body.seriesId as string);
+      forecastIds.push(...(response.body.occurrenceIds as string[]));
+      return response.body.occurrenceIds[0] as string;
+    };
+    const firstId = await createRepasse('Repasse de investimento 1', category.body.id as string, '12.00');
+    await createRepasse('Repasse de investimento 2', category.body.id as string, '12.00');
+    const currentDistribution = await api.get(`/financial-forecasts/distributions?period=${period}`).expect(200);
+    const currentOther = currentDistribution.body.find((row: { id: string }) => row.id === largestOther.id) as { value: string };
+    await createRepasse('Repasse de outra destinação', otherCategory.body.id as string, currentOther.value);
+
+    let distribution = await api.get(`/financial-forecasts/distributions?period=${period}`).expect(200);
+    expect(distribution.body.find((row: { id: string }) => row.id === investment.id).percentage).toBe('12.00');
+
+    await api.patch(`/financial-forecasts/${firstId}`)
+      .send({ amountType: 'income_percentage', percentage: '18.00' }).expect(200);
+    let forecasts = await api.get(`/financial-forecasts?period=${period}`).expect(200);
+    expect(forecasts.body.filter((row: { categoryId: string }) => row.categoryId === category.body.id)
+      .map((row: { percentage: string }) => row.percentage)).toEqual(['18.00', '18.00']);
+    distribution = await api.get(`/financial-forecasts/distributions?period=${period}`).expect(200);
+    expect(distribution.body.find((row: { id: string }) => row.id === investment.id).percentage).toBe('18.00');
+    const februaryRows = await api.get('/financial-forecasts?period=1900-02').expect(200);
+    expect(februaryRows.body.filter((row: { categoryId: string }) => row.categoryId === category.body.id)
+      .map((row: { percentage: string }) => row.percentage)).toEqual(['12.00', '12.00']);
+
+    await api.put(`/financial-forecasts/distributions/${period}`)
+      .send({ entries: await setInvestmentShare('20.00') }).expect(200);
+    forecasts = await api.get(`/financial-forecasts?period=${period}`).expect(200);
+    expect(forecasts.body.filter((row: { categoryId: string }) => row.categoryId === category.body.id)
+      .map((row: { percentage: string }) => row.percentage)).toEqual(['20.00', '20.00']);
+
+    await api.patch(`/financial-forecasts/${firstId}?scope=future`)
+      .send({ amountType: 'income_percentage', percentage: '99.00' }).expect(200);
+    forecasts = await api.get('/financial-forecasts').expect(200);
+    expect(forecasts.body.filter((row: { categoryId: string }) => row.categoryId === category.body.id)
+      .map((row: { percentage: string }) => row.percentage)).toEqual(Array(6).fill('99.00'));
+    const februaryDistribution = await api.get('/financial-forecasts/distributions?period=1900-02').expect(200);
+    expect(februaryDistribution.body.find((row: { id: string }) => row.id === investment.id).percentage).toBe('99.00');
+    const otherForecasts = forecasts.body.filter((row: { categoryId: string }) => row.categoryId === otherCategory.body.id);
+    expect(otherForecasts.map((row: { percentage: string }) => row.percentage)).toEqual(Array(3).fill('0.00'));
+    distribution = await api.get(`/financial-forecasts/distributions?period=${period}`).expect(200);
+    expect(distribution.body.reduce((sum: number, row: { percentage: string }) => sum + Number(row.percentage), 0)).toBe(100);
+    expect(distribution.body.every((row: { percentage: string }) => Number(row.percentage) >= 0)).toBe(true);
+    await api.patch(`/financial-forecasts/${firstId}?scope=future`)
+      .send({ amountType: 'income_percentage', percentage: '100.01' }).expect(400);
+    const unchangedDistribution = await api.get(`/financial-forecasts/distributions?period=${period}`).expect(200);
+    expect(unchangedDistribution.body.find((row: { id: string }) => row.id === investment.id).percentage).toBe('99.00');
   });
 
   it('exclui a previsão da lista em vez de mantê-la como cancelada', async () => {

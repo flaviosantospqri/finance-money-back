@@ -25,6 +25,7 @@ import { globalRepassesSourceSchema } from './migrations/011-global-repasses-sou
 import { investmentRefundSchema } from './migrations/012-investment-refund.js';
 import { forecastIncomePercentageSchema } from './migrations/013-forecast-income-percentage.js';
 import { categoryNameScopeSchema } from './migrations/014-category-name-scope.js';
+import { forecastIncomePercentageZeroSchema } from './migrations/015-forecast-income-percentage-zero.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -223,6 +224,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['014-category-name-scope'],
         );
         this.logger.log('Applied database migration 014-category-name-scope.');
+      }
+      const forecastIncomePercentageZeroApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['015-forecast-income-percentage-zero'],
+      );
+      if (forecastIncomePercentageZeroApplied.rowCount === 0) {
+        await client.query(forecastIncomePercentageZeroSchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['015-forecast-income-percentage-zero'],
+        );
+        this.logger.log('Applied database migration 015-forecast-income-percentage-zero.');
       }
       await client.query('COMMIT');
     } catch (error) {

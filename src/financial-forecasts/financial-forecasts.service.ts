@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import type { PoolClient } from 'pg';
 import { DatabaseService } from '../database/database.service.js';
 import { CreateForecastDto, UpdateForecastDto } from './dto/forecast.dto.js';
 
@@ -22,6 +23,15 @@ type ForecastRow = {
   group_id: string | null;
   amount_type: 'fixed' | 'income_percentage';
   percentage: string | null;
+};
+type DistributionRow = {
+  id: string;
+  name: string;
+  valueType: 'percentage' | 'fixed';
+  value: string;
+  percentage: string;
+  budget: string;
+  consumed: string;
 };
 const sumMoney = (...values: string[]) => {
   const cents = values.reduce((sum, value) => {
@@ -52,6 +62,54 @@ const percentToHundredths = (value: string) => {
     throw new BadRequestException('Um percentual não pode ser maior que 100%.');
   return amount;
 };
+export function rebalanceDistributionRows(
+  rows: DistributionRow[],
+  destinationId: string,
+  percentage: string,
+) {
+  const target = rows.find((row) => row.id === destinationId);
+  if (!target)
+    throw new BadRequestException('A destinação desta previsão não possui regra de distribuição na competência.');
+  if (target.valueType !== 'percentage')
+    throw new BadRequestException(`A destinação ${target.name} usa valor fixo. Altere para percentual na distribuição antes de sincronizar.`);
+
+  const targetValue = percentToHundredths(percentage);
+  const currentValue = percentToHundredths(target.value);
+  const peers = rows
+    .filter((row) => row.id !== destinationId && row.valueType === 'percentage')
+    .sort((left, right) => {
+      const difference = percentToHundredths(right.value) - percentToHundredths(left.value);
+      return difference > 0n ? 1 : difference < 0n ? -1 : left.name.localeCompare(right.name, 'pt-BR');
+    });
+  if (!peers.length && targetValue !== currentValue)
+    throw new BadRequestException('É necessário haver outra destinação percentual para rebalancear a distribuição.');
+
+  const updated = new Map(rows.map((row) => [row.id, row.value]));
+  updated.set(destinationId, percentage);
+  const delta = targetValue - currentValue;
+  if (delta > 0n) {
+    let remaining = delta;
+    for (const peer of peers) {
+      if (remaining === 0n) break;
+      const peerValue = percentToHundredths(peer.value);
+      const removed = peerValue < remaining ? peerValue : remaining;
+      updated.set(peer.id, `${(peerValue - removed) / 100n}.${((peerValue - removed) % 100n).toString().padStart(2, '0')}`);
+      remaining -= removed;
+    }
+    if (remaining > 0n)
+      throw new BadRequestException('Não há percentual suficiente nas outras destinações para aplicar este repasse.');
+  } else if (delta < 0n && peers.length) {
+    const largest = peers[0];
+    const newValue = percentToHundredths(largest.value) - delta;
+    updated.set(largest.id, `${newValue / 100n}.${(newValue % 100n).toString().padStart(2, '0')}`);
+  }
+
+  return rows.map((row) => ({
+    destinationId: row.id,
+    valueType: row.valueType,
+    value: updated.get(row.id) ?? row.value,
+  }));
+}
 
 // Percentual previsto para investimentos é alocação patrimonial, não despesa operacional.
 const isInvestmentAllocation = (forecast: Record<string, string>) =>
@@ -163,7 +221,7 @@ export class FinancialForecastsService {
           f.destination_id AS "destinationId", d.name AS "destinationName", f.group_id AS "groupId", fg.name AS "groupName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
           CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)-COALESCE(r.realized,0),0)::text END AS pending,
           (COALESCE(r.realized,0)>(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) AS divergence, f.closed_at IS NOT NULL AS closed,
-          CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR ((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)>0 AND COALESCE(r.realized,0)>=(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) THEN 'realized'
+          CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR (f.amount_type='income_percentage' AND ROUND(COALESCE(mi.amount,0)*f.percentage/100,2)=0) OR ((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)>0 AND COALESCE(r.realized,0)>=(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) THEN 'realized'
             WHEN COALESCE(r.realized,0)>0 THEN 'partial'
             WHEN f.due_date < CURRENT_DATE THEN 'overdue' ELSE 'pending' END AS status
         FROM financial_forecasts f JOIN financial_forecast_series s ON s.id=f.series_id
@@ -198,7 +256,7 @@ export class FinancialForecastsService {
       throw new BadRequestException(
         'Informe uma descrição e um valor maior que zero.',
       );
-    if (amountType === 'income_percentage' && (input.kind !== 'expense' || !percentage || Number(percentage) <= 0 || Number(percentage) > 100))
+    if (amountType === 'income_percentage' && (input.kind !== 'expense' || percentage === null || Number(percentage) < 0 || Number(percentage) > 100))
       throw new BadRequestException('Informe uma despesa e um percentual válido sobre os recebimentos.');
     const storedAmount = amountType === 'income_percentage' ? '0.01' : input.amount;
     if (input.recurrence !== 'once' && input.occurrenceCount < 2)
@@ -233,11 +291,13 @@ export class FinancialForecastsService {
       );
       const id = series.rows[0].id;
       const created: string[] = [];
+      let lastPeriod = input.dueDate.slice(0, 7);
       const destinationId = input.kind === 'expense'
         ? category.rows[0].destination_id
         : input.destinationId || null;
       for (let index = 0; index < count; index += 1) {
         const dueDate = this.nextDate(input.dueDate, input.recurrence, index);
+        lastPeriod = dueDate.slice(0, 7);
         const row = await client.query<{ id: string }>(
           `INSERT INTO financial_forecasts(series_id,occurrence_index,kind,description,amount,due_date,category_id,account_id,destination_id,notes,group_id,amount_type,percentage) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
           [
@@ -257,6 +317,15 @@ export class FinancialForecastsService {
           ],
         );
         created.push(row.rows[0].id);
+      }
+      if (amountType === 'income_percentage' && destinationId) {
+        await this.syncDistributionForRepasse(
+          client,
+          input.dueDate.slice(0, 7),
+          destinationId,
+          percentage!,
+          lastPeriod,
+        );
       }
       return { seriesId: id, occurrenceIds: created };
     });
@@ -338,7 +407,7 @@ export class FinancialForecastsService {
         input.notes === undefined ? current.notes : input.notes?.trim() || null,
       groupId: input.groupId === undefined ? current.group_id : input.groupId || null,
     };
-    if (data.amountType === 'income_percentage' && (current.kind !== 'expense' || !data.percentage || Number(data.percentage) <= 0 || Number(data.percentage) > 100))
+    if (data.amountType === 'income_percentage' && (current.kind !== 'expense' || data.percentage === null || Number(data.percentage) < 0 || Number(data.percentage) > 100))
       throw new BadRequestException('Informe um percentual válido entre 0 e 100%.');
     await this.db.transaction(async (client) => {
       const valid = await client.query<{ destination_id: string }>(
@@ -378,6 +447,26 @@ export class FinancialForecastsService {
         `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${categoryParameter},account_id=$${categoryParameter + 1},destination_id=$${categoryParameter + 2},notes=$${categoryParameter + 3},group_id=$${categoryParameter + 4},amount_type=$${categoryParameter + 5},percentage=$${categoryParameter + 6},updated_at=NOW() WHERE ${predicate}`,
         [...args, ...changes, data.amountType, data.percentage],
       );
+      if (data.amountType === 'income_percentage' && data.destinationId) {
+        let lastPeriod = data.dueDate.slice(0, 7);
+        if (scope === 'future') {
+          const latest = await client.query<{ period: string }>(
+            `SELECT to_char(MAX(due_date),'YYYY-MM') AS period
+             FROM financial_forecasts
+             WHERE series_id=$1 AND due_date >= $2::date
+               AND deleted_at IS NULL AND cancelled_at IS NULL`,
+            [current.series_id, data.dueDate],
+          );
+          lastPeriod = latest.rows[0]?.period ?? lastPeriod;
+        }
+        await this.syncDistributionForRepasse(
+          client,
+          data.dueDate.slice(0, 7),
+          data.destinationId,
+          data.percentage!,
+          lastPeriod,
+        );
+      }
     });
     return this.findOne(id);
   }
@@ -647,16 +736,11 @@ export class FinancialForecastsService {
   }
 
   async getDistributions(period: string) {
-    const result = await this.db.query<{
-      id: string;
-      name: string;
-      valueType: 'percentage' | 'fixed';
-      value: string;
-      percentage: string;
-      budget: string;
-      consumed: string;
-    }>(
-      `WITH income_total AS (
+    return this.queryDistributions(period);
+  }
+
+  private async queryDistributions(period: string, client?: PoolClient) {
+    const sql = `WITH income_total AS (
          SELECT COALESCE(SUM(amount),0) amount FROM financial_forecasts
          WHERE kind='income' AND deleted_at IS NULL AND cancelled_at IS NULL AND to_char(due_date,'YYYY-MM')=$1
        ), global_repasses AS (
@@ -687,9 +771,10 @@ export class FinancialForecastsService {
            WHERE c.destination_id=d.id AND e.entry_type='expense' AND e.deleted_at IS NULL
              AND to_char(e.occurred_at,'YYYY-MM')=$1),0)::numeric(14,2)::text AS consumed
        FROM targets d CROSS JOIN income_total
-       ORDER BY CASE d.name WHEN 'Despesas gerais' THEN 1 WHEN 'Investimentos' THEN 2 WHEN 'Flávio' THEN 3 WHEN 'Laura' THEN 4 WHEN 'Outras' THEN 5 ELSE 6 END,d.name`,
-      [period],
-    );
+       ORDER BY CASE d.name WHEN 'Despesas gerais' THEN 1 WHEN 'Investimentos' THEN 2 WHEN 'Flávio' THEN 3 WHEN 'Laura' THEN 4 WHEN 'Outras' THEN 5 ELSE 6 END,d.name`;
+    const result = client
+      ? await client.query<DistributionRow>(sql, [period])
+      : await this.db.query<DistributionRow>(sql, [period]);
     return result.rows;
   }
 
@@ -719,48 +804,153 @@ export class FinancialForecastsService {
     }
     const useGlobalRules = period >= this.currentPeriod();
     await this.db.transaction(async (client) => {
-      if (useGlobalRules) {
-        const destinations = await client.query<{ id: string }>(
-          'SELECT id FROM forecast_destinations WHERE id=ANY($1::uuid[]) AND active=TRUE',
-          [entries.map((row) => row.destinationId)],
-        );
-        if (destinations.rowCount !== entries.length)
-          throw new BadRequestException('Uma ou mais destinações não estão mais disponíveis. Recarregue a página.');
-
-        const previousPeriod = this.previousPeriod(period);
-        await client.query(
-          `UPDATE financial_repasses SET effective_to=$2,updated_at=NOW()
-           WHERE deleted_at IS NULL AND effective_from<$1 AND (effective_to IS NULL OR effective_to>=$1)`,
-          [period, previousPeriod],
-        );
-        await client.query(
-          `UPDATE financial_repasses SET deleted_at=NOW(),updated_at=NOW()
-           WHERE deleted_at IS NULL AND effective_from >= $1`,
-          [period],
-        );
-        await client.query('DELETE FROM forecast_distributions WHERE period >= $1', [period]);
-        for (const row of entries) {
-          const valueType = row.valueType ?? 'percentage';
-          const value = row.value ?? row.percentage ?? '0';
-          await client.query(
-            'INSERT INTO financial_repasses(destination_id,value_type,value,effective_from) VALUES($1,$2,$3,$4)',
-            [row.destinationId, valueType, value, period],
-          );
-        }
-      } else {
-        await client.query('DELETE FROM forecast_distributions WHERE period=$1', [period]);
-        for (const row of entries) {
-          const valueType = row.valueType ?? 'percentage';
-          const value = row.value ?? row.percentage ?? '0';
-          const percentage = valueType === 'percentage' ? value : '0';
-          await client.query(
-            'INSERT INTO forecast_distributions(period,destination_id,percentage,value_type,value) VALUES($1,$2,$3,$4,$5)',
-            [period, row.destinationId, percentage, valueType, value],
-          );
-        }
-      }
+      await this.persistDistributions(client, period, entries, useGlobalRules);
+      await this.syncForecastsFromDistributions(
+        client,
+        period,
+        entries,
+        useGlobalRules,
+      );
     });
     return this.getDistributions(period);
+  }
+
+  private async persistDistributions(
+    client: PoolClient,
+    period: string,
+    entries: { destinationId: string; percentage?: string; valueType?: 'percentage' | 'fixed'; value?: string }[],
+    useGlobalRules: boolean,
+  ) {
+    if (useGlobalRules) {
+      const destinations = await client.query<{ id: string }>(
+        'SELECT id FROM forecast_destinations WHERE id=ANY($1::uuid[]) AND active=TRUE',
+        [entries.map((row) => row.destinationId)],
+      );
+      if (destinations.rowCount !== entries.length)
+        throw new BadRequestException('Uma ou mais destinações não estão mais disponíveis. Recarregue a página.');
+
+      const previousPeriod = this.previousPeriod(period);
+      await client.query(
+        `UPDATE financial_repasses SET effective_to=$2,updated_at=NOW()
+         WHERE deleted_at IS NULL AND effective_from<$1 AND (effective_to IS NULL OR effective_to>=$1)`,
+        [period, previousPeriod],
+      );
+      await client.query(
+        `UPDATE financial_repasses SET deleted_at=NOW(),updated_at=NOW()
+         WHERE deleted_at IS NULL AND effective_from >= $1`,
+        [period],
+      );
+      await client.query('DELETE FROM forecast_distributions WHERE period >= $1', [period]);
+      for (const row of entries) {
+        const valueType = row.valueType ?? 'percentage';
+        const value = row.value ?? row.percentage ?? '0';
+        await client.query(
+          'INSERT INTO financial_repasses(destination_id,value_type,value,effective_from) VALUES($1,$2,$3,$4)',
+          [row.destinationId, valueType, value, period],
+        );
+      }
+      return;
+    }
+
+    await client.query('DELETE FROM forecast_distributions WHERE period=$1', [period]);
+    for (const row of entries) {
+      const valueType = row.valueType ?? 'percentage';
+      const value = row.value ?? row.percentage ?? '0';
+      const percentage = valueType === 'percentage' ? value : '0';
+      await client.query(
+        'INSERT INTO forecast_distributions(period,destination_id,percentage,value_type,value) VALUES($1,$2,$3,$4,$5)',
+        [period, row.destinationId, percentage, valueType, value],
+      );
+    }
+  }
+
+  private async syncForecastsFromDistributions(
+    client: PoolClient,
+    period: string,
+    entries: { destinationId: string; percentage?: string; valueType?: 'percentage' | 'fixed'; value?: string }[],
+    fromPeriodForward: boolean,
+  ) {
+    const startDate = `${period}-01`;
+    for (const row of entries) {
+      if ((row.valueType ?? 'percentage') !== 'percentage') continue;
+      const percentage = row.value ?? row.percentage ?? '0';
+      await client.query(
+        `UPDATE financial_forecasts f
+         SET percentage=$3,updated_at=NOW()
+         FROM financial_categories c
+         WHERE c.id=f.category_id AND c.destination_id=$1
+           AND f.amount_type='income_percentage' AND f.deleted_at IS NULL AND f.cancelled_at IS NULL
+           AND f.due_date >= $2::date
+           AND ($4::boolean OR date_trunc('month',f.due_date)=date_trunc('month',$2::date))`,
+        [row.destinationId, startDate, percentage, fromPeriodForward],
+      );
+    }
+  }
+
+  private async syncDistributionForRepasse(
+    client: PoolClient,
+    period: string,
+    destinationId: string,
+    percentage: string,
+    throughPeriod: string,
+  ) {
+    const currentPeriod = this.currentPeriod();
+    const useGlobalRules = period >= currentPeriod;
+    if (useGlobalRules) {
+      await this.updateDistributionPeriod(client, period, destinationId, percentage, true);
+      return;
+    }
+
+    const affected = await client.query<{ period: string }>(
+      `SELECT DISTINCT to_char(f.due_date,'YYYY-MM') AS period
+       FROM financial_forecasts f
+       JOIN financial_categories c ON c.id=f.category_id
+       WHERE c.destination_id=$1 AND f.amount_type='income_percentage'
+         AND f.deleted_at IS NULL AND f.cancelled_at IS NULL
+         AND f.due_date >= $2::date AND f.due_date <= ($3::date + INTERVAL '1 month - 1 day')
+         AND f.due_date < $4::date
+       ORDER BY period`,
+      [destinationId, `${period}-01`, `${throughPeriod}-01`, `${currentPeriod}-01`],
+    );
+    const historicalPeriods = new Set(affected.rows.map((row) => row.period));
+    historicalPeriods.add(period);
+    for (const historicalPeriod of [...historicalPeriods].sort()) {
+      await this.updateDistributionPeriod(
+        client,
+        historicalPeriod,
+        destinationId,
+        percentage,
+        false,
+      );
+    }
+
+    if (throughPeriod >= currentPeriod) {
+      await this.updateDistributionPeriod(
+        client,
+        currentPeriod,
+        destinationId,
+        percentage,
+        true,
+      );
+    }
+  }
+
+  private async updateDistributionPeriod(
+    client: PoolClient,
+    period: string,
+    destinationId: string,
+    percentage: string,
+    useGlobalRules: boolean,
+  ) {
+    const rows = await this.queryDistributions(period, client);
+    const entries = rebalanceDistributionRows(rows, destinationId, percentage);
+    await this.persistDistributions(client, period, entries, useGlobalRules);
+    await this.syncForecastsFromDistributions(
+      client,
+      period,
+      entries,
+      useGlobalRules,
+    );
   }
 
   async copyDistributions(period: string, targetPeriod: string) {
