@@ -205,10 +205,12 @@ export class FinancialForecastsService {
           f.amount_type AS "amountType", f.percentage::text AS percentage,
           to_char(f.due_date,'YYYY-MM-DD') AS "dueDate",
           f.category_id AS "categoryId", concat_ws(' / ', parent_category.name, c.name) AS "categoryName", category_destination.name AS "categoryDestinationName", f.account_id AS "accountId", a.name AS "accountName",
-          f.destination_id AS "destinationId", d.name AS "destinationName", f.group_id AS "groupId", fg.name AS "groupName", f.notes, COALESCE(r.realized,0)::text AS realized, to_char(r.realized_at,'YYYY-MM-DD') AS "realizedAt",
-          CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL THEN '0' ELSE GREATEST((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)-COALESCE(r.realized,0),0)::text END AS pending,
-          (COALESCE(r.realized,0)>(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) AS divergence, f.closed_at IS NOT NULL AS closed,
-          CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR (f.amount_type='income_percentage' AND ROUND(COALESCE(mi.amount,0)*f.percentage/100,2)=0) OR ((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)>0 AND COALESCE(r.realized,0)>=(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) THEN 'realized'
+          f.destination_id AS "destinationId", d.name AS "destinationName", f.group_id AS "groupId", fg.name AS "groupName", f.notes,
+          CASE WHEN f.retained_at IS NOT NULL THEN COALESCE(f.retained_amount,0) ELSE COALESCE(r.realized,0) END::text AS realized,
+          CASE WHEN f.retained_at IS NOT NULL THEN to_char(f.retained_at,'YYYY-MM-DD') ELSE to_char(r.realized_at,'YYYY-MM-DD') END AS "realizedAt",
+          CASE WHEN f.closed_at IS NOT NULL OR f.cancelled_at IS NOT NULL OR f.retained_at IS NOT NULL THEN '0' ELSE GREATEST((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)-COALESCE(r.realized,0),0)::text END AS pending,
+          (f.retained_at IS NULL AND COALESCE(r.realized,0)>(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) AS divergence, f.closed_at IS NOT NULL AS closed, f.retained_at IS NOT NULL AS retained,
+          CASE WHEN f.cancelled_at IS NOT NULL THEN 'cancelled' WHEN f.closed_at IS NOT NULL OR f.retained_at IS NOT NULL OR (f.amount_type='income_percentage' AND ROUND(COALESCE(mi.amount,0)*f.percentage/100,2)=0) OR ((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)>0 AND COALESCE(r.realized,0)>=(CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)) THEN 'realized'
             WHEN COALESCE(r.realized,0)>0 THEN 'partial'
             WHEN f.due_date < CURRENT_DATE THEN 'overdue' ELSE 'pending' END AS status
         FROM financial_forecasts f JOIN financial_forecast_series s ON s.id=f.series_id
@@ -440,7 +442,7 @@ export class FinancialForecastsService {
         );
       }
       await client.query(
-        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${categoryParameter},account_id=$${categoryParameter + 1},destination_id=$${categoryParameter + 2},notes=$${categoryParameter + 3},group_id=$${categoryParameter + 4},amount_type=$${categoryParameter + 5},percentage=CASE WHEN $${preserveOtherMonthsParameter}::boolean AND date_trunc('month',due_date)<>date_trunc('month',$${selectedDateParameter}::date) THEN percentage ELSE $${percentageParameter} END,updated_at=NOW() WHERE ${predicate}`,
+        `UPDATE financial_forecasts SET description=$${args.length + 1},amount=$${args.length + 2},due_date=${dateExpression},category_id=$${categoryParameter},account_id=$${categoryParameter + 1},destination_id=$${categoryParameter + 2},notes=$${categoryParameter + 3},group_id=$${categoryParameter + 4},amount_type=$${categoryParameter + 5},percentage=CASE WHEN $${preserveOtherMonthsParameter}::boolean AND date_trunc('month',due_date)<>date_trunc('month',$${selectedDateParameter}::date) THEN percentage ELSE $${percentageParameter} END,retained_at=NULL,retained_amount=NULL,updated_at=NOW() WHERE ${predicate}`,
         [...args, ...changes, data.amountType, data.percentage, preserveOtherMonths],
       );
     });
@@ -489,7 +491,7 @@ export class FinancialForecastsService {
     const income = sumMoney(
       ...byKind('income').map((f: Record<string, string>) => f.amount),
     );
-    const expense = sumMoney(...byKind('expense').map((f: Record<string, string>) => f.amount));
+    const expense = sumMoney(...byKind('expense').filter((f: Record<string, string>) => (f as Record<string, unknown>).retained !== true).map((f: Record<string, string>) => f.amount));
     const committed = sumMoney(
       ...byKind('expense').map((f: Record<string, string>) => f.pending),
     );
@@ -523,12 +525,12 @@ export class FinancialForecastsService {
         COALESCE((SELECT SUM(GREATEST((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)-COALESCE(r.realized,0),0))
           FROM financial_forecasts f LEFT JOIN reconciled r ON r.forecast_id=f.id
           LEFT JOIN monthly_income mi ON mi.month=date_trunc('month',f.due_date)::date
-          WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL
+          WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL AND f.retained_at IS NULL
             AND f.kind='income' AND f.due_date<=$1::date),0)::text AS pending_income,
         COALESCE((SELECT SUM(GREATEST((CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE(mi.amount,0)*f.percentage/100,2) ELSE f.amount END)-COALESCE(r.realized,0),0))
           FROM financial_forecasts f LEFT JOIN reconciled r ON r.forecast_id=f.id
           LEFT JOIN monthly_income mi ON mi.month=date_trunc('month',f.due_date)::date
-          WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL
+          WHERE f.deleted_at IS NULL AND f.cancelled_at IS NULL AND f.closed_at IS NULL AND f.retained_at IS NULL
             AND f.kind='expense' AND f.due_date<=$1::date),0)::text AS pending_expenses
        FROM cash_book_entries e WHERE e.deleted_at IS NULL`,
       [monthEnd],
@@ -688,6 +690,49 @@ export class FinancialForecastsService {
       [id, reason.trim()],
     );
     return this.findOne(id);
+  }
+
+  async retain(id: string) {
+    return this.db.transaction(async (client) => {
+      const forecast = await client.query<{
+        id: string;
+        kind: string;
+        retained_at: Date | null;
+        calculated_amount: string;
+      }>(
+        `SELECT f.id,f.kind,f.retained_at,
+          (CASE WHEN f.amount_type='income_percentage' THEN ROUND(COALESCE((
+            SELECT SUM(i.amount) FROM financial_forecasts i
+            WHERE i.kind='income' AND i.deleted_at IS NULL AND i.cancelled_at IS NULL
+              AND date_trunc('month',i.due_date)=date_trunc('month',f.due_date)
+          ),0)*f.percentage/100,2) ELSE f.amount END)::text AS calculated_amount
+         FROM financial_forecasts f
+         WHERE f.id=$1 AND f.deleted_at IS NULL
+         FOR UPDATE OF f`,
+        [id],
+      );
+      const row = forecast.rows[0];
+      if (!row) throw new NotFoundException('Previsão não encontrada.');
+      if (row.kind !== 'expense')
+        throw new BadRequestException('Somente uma despesa prevista pode ser retida na fonte.');
+      if (row.retained_at) return { retained: true };
+      const unavailable = await client.query(
+        `SELECT 1 FROM financial_forecasts f
+         WHERE f.id=$1 AND (f.cancelled_at IS NOT NULL OR f.closed_at IS NOT NULL)
+         UNION ALL
+         SELECT 1 FROM forecast_reconciliations r
+         WHERE r.forecast_id=$1 AND r.deleted_at IS NULL
+         LIMIT 1`,
+        [id],
+      );
+      if (unavailable.rowCount)
+        throw new BadRequestException('Uma previsão encerrada ou conciliada não pode ser retida.');
+      await client.query(
+        'UPDATE financial_forecasts SET retained_at=NOW(),retained_amount=$2,updated_at=NOW() WHERE id=$1',
+        [id, row.calculated_amount],
+      );
+      return { retained: true };
+    });
   }
 
   async getDestinations() {

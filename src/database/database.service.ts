@@ -26,6 +26,7 @@ import { investmentRefundSchema } from './migrations/012-investment-refund.js';
 import { forecastIncomePercentageSchema } from './migrations/013-forecast-income-percentage.js';
 import { categoryNameScopeSchema } from './migrations/014-category-name-scope.js';
 import { forecastIncomePercentageZeroSchema } from './migrations/015-forecast-income-percentage-zero.js';
+import { forecastRetentionSchema } from './migrations/016-forecast-retention.js';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -236,6 +237,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ['015-forecast-income-percentage-zero'],
         );
         this.logger.log('Applied database migration 015-forecast-income-percentage-zero.');
+      }
+      const forecastRetentionApplied = await client.query(
+        'SELECT version FROM schema_migrations WHERE version = $1',
+        ['016-forecast-retention'],
+      );
+      if (forecastRetentionApplied.rowCount === 0) {
+        await client.query(forecastRetentionSchema);
+        await client.query(
+          'INSERT INTO schema_migrations (version) VALUES ($1)',
+          ['016-forecast-retention'],
+        );
+        this.logger.log('Applied database migration 016-forecast-retention.');
       }
       await client.query('COMMIT');
     } catch (error) {
