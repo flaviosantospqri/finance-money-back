@@ -735,6 +735,24 @@ export class FinancialForecastsService {
     });
   }
 
+  async unretain(id: string) {
+    return this.db.transaction(async (client) => {
+      const forecast = await client.query<{ id: string; retained_at: Date | null }>(
+        `SELECT id,retained_at FROM financial_forecasts
+         WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`,
+        [id],
+      );
+      const row = forecast.rows[0];
+      if (!row) throw new NotFoundException('Previsão não encontrada.');
+      if (!row.retained_at) return { retained: false };
+      await client.query(
+        'UPDATE financial_forecasts SET retained_at=NULL,retained_amount=NULL,updated_at=NOW() WHERE id=$1',
+        [id],
+      );
+      return { retained: false };
+    });
+  }
+
   async getDestinations() {
     return (
       await this.db.query(

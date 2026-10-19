@@ -118,6 +118,9 @@ export class FinancialForecastsController {
   @Post(':id/retain') retain(@Param('id', ParseUUIDPipe) id: string) {
     return this.forecasts.retain(id);
   }
+  @Post(':id/unretain') unretain(@Param('id', ParseUUIDPipe) id: string) {
+    return this.forecasts.unretain(id);
+  }
   @Patch(':id') update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateForecastDto,
